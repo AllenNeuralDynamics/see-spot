@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Unmixed Spots Visualization</title>
+    <!-- Include ECharts -->
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+    <style>
+        body { font-family: sans-serif; display: flex; margin: 0; }
+        #sidebar { width: 250px; background-color: #f4f4f4; padding: 15px; height: 100vh; border-right: 1px solid #ddd; }
+        #main-content { 
+            flex-grow: 1; 
+            padding: 20px; 
+            display: flex; 
+        }
+        #charts-column {
+            width: 65%;
+            display: flex;
+            flex-direction: column;
+        }
+        #main-chart { 
+            width: 100%; 
+            height: 600px; 
+            border: 1px solid #ccc; 
+            margin-bottom: 20px;
+        }
+        #summary-charts {
+            display: flex;
+            width: 100%;
+            height: 300px;
+            gap: 10px;
+        }
+        #summary-bar-chart {
+            width: 33.33%;
+            height: 100%;
+            border: 1px solid #ddd;
+        }
+        #summary-heatmap {
+            width: 33.33%;
+            height: 100%;
+            border: 1px solid #ddd;
+        }
+        #future-chart {
+            width: 33.33%;
+            height: 100%;
+            border: 1px solid #ddd;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background-color: #f9f9f9;
+            color: #999;
+            font-style: italic;
+        }
+        #spots_details { 
+            width: 30%; 
+            margin-left: 2%; 
+            display: flex; 
+            flex-direction: column;
+            height: 920px; /* Match the height of charts column (600px main + 300px summary + 20px margin) */
+        }
+        #spots_container { 
+            border: 1px solid #ccc; 
+            padding: 10px; 
+            flex-grow: 1; 
+            overflow-y: auto; 
+            margin-top: 10px;
+        }
+        #data-table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        #data-table th, #data-table td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        #data-table th { background-color: #f2f2f2; }
+        button { padding: 5px 10px; cursor: pointer; }
+        #spots_controls { 
+            margin-bottom: 15px;
+            padding: 10px;
+            border: 1px solid #eee;
+            background-color: #f9f9f9;
+            border-radius: 4px;
+            overflow-y: auto; /* Add scrolling to controls if they get too tall */
+            flex-shrink: 0; /* Prevent shrinking */
+            height: 420px; /* Fixed height */
+        }
+        #spots_controls > div { 
+             display: flex;
+             align-items: center;
+             gap: 5px;
+        }
+        #spots_buttons_container { 
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        #channel_navigation {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            margin-bottom: 10px;
+        }
+        #channel_navigation button {
+            font-size: 18px;
+            font-weight: bold;
+            padding: 5px 15px;
+            background-color: #4285f4;
+            color: white;
+            border: none;
+            border-radius: 4px;
+        }
+        #current_channel_display {
+            font-size: 16px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div id="sidebar">
+        <!-- <h2>Navigation</h2>
+        <ul>
+            <li><a href="/">Home</a></li>
+            <li><a href="/spots">Spots</a></li>
+            <li><a href="/unmixed-spots">Unmixed Spots</a></li>
+        </ul>
+         <h3>S3 Operations</h3>
+        <ul>
+            <li>Test S3 Connection</li>
+            <li>List S3 Objects</li>
+        </ul>
+         <h3>Dataset Controls</h3>
+        <ul>
+            <li>Load Default Dataset</li>
+            <li>Load Dataset 1</li>
+            <li>Load Dataset 2</li>
+            <li>Load Dataset 3</li>
+        </ul> -->
+        
+        <h3>Hotkeys</h3>
+        <div style="padding: 5px 10px; background-color: #f0f0f0; border-radius: 4px; margin-bottom: 15px;">
+            <div style="margin-bottom: 10px;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <strong>Neuroglancer Mode</strong>
+                    <div id="neuroglancer_indicator" style="width: 12px; height: 12px; background-color: #9E9E9E; border-radius: 50%;"></div>
+                </div>
+                <div>Hold <kbd style="background-color: #e2e2e2; border: 1px solid #d2d2d2; border-radius: 3px; padding: 1px 5px; font-family: monospace;">N</kbd> key</div>
+                <div style="font-size: 12px; color: #666; margin-top: 5px;">
+                    Status: <span id="neuroglancer_status">OFF</span>
+                </div>
+                <div style="font-size: 12px; color: #666;">
+                    Click on points to see coordinates
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="main-content">
+        <div id="charts-column">
+            <div id="main-chart"></div>
+            <div id="summary-charts">
+                <div id="summary-bar-chart"></div>
+                <div id="summary-heatmap"></div>
+                <div id="future-chart">Future Visualization</div>
+            </div>
+        </div>
+        
+        <div id="spots_details">
+            <div id="spots_controls">
+                <div id="channel_navigation">
+                    <button id="prev_channel_pair">&lt;</button>
+                    <span id="current_channel_display">Channel: 488 vs 514</span>
+                    <button id="next_channel_pair">&gt;</button>
+                </div>
+                <div id="sample_controls" style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
+                    <label for="sample-size-input">Sample Size:</label>
+                    <input type="number" id="sample-size-input" value="1000" min="100" max="100000" style="width: 100px;">
+                    <button id="resample_button">Resample Data</button>
+                    <button id="refresh_button" title="Reload data from source" style="background-color: #e3f2fd; border-color: #2196f3;">
+                        <span style="display: inline-block; transform: rotate(90deg);">↻</span> Refresh Cache
+                    </button>
+                </div>
+                <div id="sample_size_note" style="margin-bottom: 15px; padding: 8px; border-radius: 4px; background-color: #e8f5e9; font-size: 13px; display: flex; align-items: center;">
+                    <span id="sample_size_icon" style="margin-right: 8px; font-weight: bold; color: #4caf50;">✓</span>
+                    <span id="sample_size_text">Small sample: full feature set</span>
+                </div>
+                <div id="filters" style="display: flex; flex-direction: column; gap: 10px; margin-bottom: 15px; background-color: #ffebee; padding: 10px; border-radius: 4px;">
+                    <div style="font-weight: bold; margin-bottom: 5px;">Filters</div>
+                    <div style="display: flex; align-items: center;">
+                        <label for="highlight_reassigned_toggle" style="margin-right: 10px;">Show reassigned:</label>
+                        <div class="toggle-switch">
+                            <input type="checkbox" id="highlight_reassigned_toggle" style="display: none;">
+                            <label for="highlight_reassigned_toggle" style="position: relative; display: inline-block; width: 40px; height: 20px; background-color: #ccc; border-radius: 20px; cursor: pointer; transition: background-color 0.3s;">
+                                <span style="position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background-color: white; transition: left 0.3s;"></span>
+                            </label>
+                        </div>
+                        <span id="highlight_status" style="margin-left: 10px; font-size: 13px;">Off</span>
+                    </div>
+                </div>
+                <div id="label_controls" style="display: flex; flex-direction: column; gap: 10px; margin-bottom: 15px; background-color: #fff3e0; padding: 10px; border-radius: 4px;">
+                    <div style="font-weight: bold; margin-bottom: 5px;">Labeling Controls</div>
+                    <div>
+                        <label for="label_input">Current Label:</label>
+                        <input type="text" id="label_input" placeholder="Enter label (optional)">
+                        <span id="active_label_display" style="font-style: italic;">(None)</span>
+                    </div>
+                </div>
+                <div id="table_controls" style="display: flex; flex-direction: column; gap: 10px; margin-bottom: 15px; background-color: #e8f5e9; padding: 10px; border-radius: 4px;">
+                    <div style="font-weight: bold; margin-bottom: 5px;">Table Controls</div>
+                    <div id="spots_buttons_container">
+                        <button id="add_lasso_selection_button">Add Lasso Selection</button>
+                        <button id="clear_spots_button">Clear Selected Spots</button>
+                        <button id="export_csv_button">Export Table as CSV</button>
+                    </div>
+                </div>
+            </div>
+             <div id="spots_container">
+                <h3>Selected Spots</h3>
+                <table id="data-table">
+                    <thead>
+                        <tr>
+                            <th>Spot ID</th>
+                            <th>Channel</th>
+                            <th>X-Channel</th>
+                            <th>Y-Channel</th>
+                            <th>R</th>
+                            <th>Dist</th>
+                            <th>Unmixed</th>
+                            <th>Reassigned</th>
+                            <th>Label</th>
+                        </tr>
+                    </thead>
+                    <tbody id="data-table-body">
+                        <!-- Clicked spot details will be added here -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Include your custom JavaScript -->
+    <script src="/static/js/unmixed_spots.js"></script>
+</body>
+</html> 

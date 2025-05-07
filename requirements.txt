@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+pandas
+numpy
+boto3
+jinja2
+pathlib
+python-multipart
+s3fs
+zarr
+aind-ng-link @ git+https://github.com/AllenNeuralDynamics/aind-ng-link.git
