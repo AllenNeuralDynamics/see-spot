@@ -17,7 +17,8 @@ from typing import List, Tuple, Dict, Any
 from see_spot.s3_handler import s3_handler
 from see_spot.s3_utils import (
     find_unmixed_spots_file, find_related_files, 
-    load_pkl_from_s3, load_ratios_from_s3, load_summary_stats_from_s3
+    load_pkl_from_s3, load_ratios_from_s3, load_summary_stats_from_s3,
+    load_processing_manifest_from_s3
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -35,16 +36,26 @@ app.mount("/static", StaticFiles(directory=static_dir), name="static")
 templates = Jinja2Templates(directory=templates_dir)
 
 # Configuration for the spots data
-REAL_SPOTS_BUCKET = "codeocean-s3datasetsbucket-1u41qdg42ur9"
-REAL_SPOTS_PREFIX = "4c76aae1-d7f0-4ed7-b7f6-72b460f5724d/"
-REAL_SPOTS_PATTERN = "unmixed_spots_*.pkl"
+# REAL_SPOTS_BUCKET = "codeocean-s3datasetsbucket-1u41qdg42ur9"
+# REAL_SPOTS_PREFIX = "4c76aae1-d7f0-4ed7-b7f6-72b460f5724d/"
+
+
+REAL_SPOTS_BUCKET = "aind-open-data"
+# Define the root prefix for a processed dataset.
+# This will be the base for finding manifest, spots, and fused data.
+# Example: "HCR_747667_2025-04-18_13-00-00_processed_2025-05-13_23-21-01"
+PROCESSED_DATA_ROOT_PREFIX = "HCR_747667_2025-04-18_13-00-00_processed_2025-05-13_23-21-01"
+# REAL_SPOTS_PREFIX will be derived: PROCESSED_DATA_ROOT_PREFIX + "/image_spot_spectral_unmixing/"
+# REAL_SPOTS_PATTERN is static: "unmixed_spots_*.pkl"
 SAMPLE_SIZE = 10000 # Number of points to send to frontend
 
 # In-memory cache for DataFrame to avoid reloading on every request
 df_cache = {
     "data": None,
     "last_loaded": None,
-    "target_key": None
+    "target_key": None,
+    "processing_manifest": None,
+    "spot_channels_from_manifest": None
 }
 
 def get_channel_pairs(df: pd.DataFrame) -> List[Tuple[str, str]]:
@@ -63,17 +74,53 @@ async def get_real_spots_data(sample_size: int = SAMPLE_SIZE, force_refresh: boo
         df = df_cache["data"]
         # We still need to find related files if they weren't cached
         target_key = df_cache.get("target_key")
+        # Load manifest and channels from cache if available, or re-fetch
+        processing_manifest = df_cache.get("processing_manifest")
+        spot_channels_from_manifest = df_cache.get("spot_channels_from_manifest")
+        if not processing_manifest or not spot_channels_from_manifest:
+            # Construct manifest path and load
+            manifest_key = f"{PROCESSED_DATA_ROOT_PREFIX}/derived/processing_manifest.json"
+            logger.info(f"Attempting to load processing manifest from: s3://{REAL_SPOTS_BUCKET}/{manifest_key}")
+            processing_manifest = load_processing_manifest_from_s3(REAL_SPOTS_BUCKET, manifest_key)
+            if processing_manifest and "spot_channels" in processing_manifest:
+                spot_channels_from_manifest = processing_manifest["spot_channels"]
+                df_cache["processing_manifest"] = processing_manifest
+                df_cache["spot_channels_from_manifest"] = spot_channels_from_manifest
+                logger.info(f"Loaded spot channels from manifest: {spot_channels_from_manifest}")
+            else:
+                logger.error(f"Could not load processing manifest or find 'spot_channels'. Manifest: {processing_manifest}")
+                # Fallback or error handling if manifest is crucial for channel pairs
+                spot_channels_from_manifest = [] # Default to empty or handle error response
     else:
         # Need to load DataFrame from S3
-        # 1. Find the data file
+        # 1. Load processing manifest to determine paths and channels
+        manifest_key = f"{PROCESSED_DATA_ROOT_PREFIX}/derived/processing_manifest.json"
+        logger.info(f"Attempting to load processing manifest from: s3://{REAL_SPOTS_BUCKET}/{manifest_key}")
+        processing_manifest = load_processing_manifest_from_s3(REAL_SPOTS_BUCKET, manifest_key)
+
+        if not processing_manifest:
+            logger.error(f"Could not load processing manifest from {manifest_key}.")
+            return JSONResponse(status_code=500, content={'error': 'Failed to load processing manifest'})
+
+        spot_channels_from_manifest = processing_manifest.get("spot_channels", [])
+        if not spot_channels_from_manifest:
+            logger.warning("No 'spot_channels' found in manifest. Channel pairs might be incomplete.")
+            # Potentially return an error if these are strictly required later on
+        else:
+            logger.info(f"Loaded spot channels from manifest: {spot_channels_from_manifest}")
+
+
+        # 2. Find the data file
+        unmixed_spots_prefix = f"{PROCESSED_DATA_ROOT_PREFIX}/image_spot_spectral_unmixing/"
+        unmixed_spots_pattern = "unmixed_spots_*.pkl"
         target_key = find_unmixed_spots_file(
-            REAL_SPOTS_BUCKET, REAL_SPOTS_PREFIX, REAL_SPOTS_PATTERN
+            REAL_SPOTS_BUCKET, unmixed_spots_prefix, unmixed_spots_pattern
         )
         if not target_key:
-            logger.error(f"Could not find spots file matching pattern.")
+            logger.error(f"Could not find spots file matching pattern '{unmixed_spots_pattern}' in '{unmixed_spots_prefix}'.")
             return JSONResponse(status_code=404, content={'error': 'Spots data file not found on S3'})
 
-        # 2. Load the data (uses caching via download_file)
+        # 3. Load the data (uses caching via download_file)
         logger.info(f"Loading data from s3://{REAL_SPOTS_BUCKET}/{target_key}")
         try:
             df = load_pkl_from_s3(REAL_SPOTS_BUCKET, target_key)
@@ -81,25 +128,29 @@ async def get_real_spots_data(sample_size: int = SAMPLE_SIZE, force_refresh: boo
                 logger.error("Failed to load DataFrame from S3/cache.")
                 return JSONResponse(status_code=500, content={'error': 'Failed to load spots data'})
             logger.info(f"Loaded DataFrame shape: {df.shape}")
-            
+
             # Update cache
             df_cache["data"] = df
             df_cache["last_loaded"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             df_cache["target_key"] = target_key
+            df_cache["processing_manifest"] = processing_manifest # Cache manifest
+            df_cache["spot_channels_from_manifest"] = spot_channels_from_manifest # Cache channels
             logger.info(f"Updated DataFrame cache at {df_cache['last_loaded']}")
         except Exception as e:
             logger.error(f"Exception during DataFrame loading: {e}", exc_info=True)
             return JSONResponse(status_code=500, content={'error': 'Error loading spots data'})
 
-    # 3. Find and load related files (ratios and summary_stats)
+    # 4. Find and load related files (ratios and summary_stats)
+    # Related files are expected to be in the same directory as the target_key (unmixed_spots file)
     ratios_data = None
     summary_stats_data = None
-    
+
     if target_key:
-        # Find related files
-        related_files = find_related_files(REAL_SPOTS_BUCKET, REAL_SPOTS_PREFIX, target_key)
-        logger.info(f"Found related files: {related_files}")
-        
+        # The prefix for related files should be the directory of the target_key
+        related_files_prefix = str(Path(target_key).parent) + "/" # Ensure trailing slash
+        related_files = find_related_files(REAL_SPOTS_BUCKET, related_files_prefix, target_key)
+        logger.info(f"Searching for related files in '{related_files_prefix}'. Found: {related_files}")
+
         # Load ratios file if found
         if related_files['ratios']:
             ratios_data = load_ratios_from_s3(REAL_SPOTS_BUCKET, related_files['ratios'])
@@ -115,7 +166,7 @@ async def get_real_spots_data(sample_size: int = SAMPLE_SIZE, force_refresh: boo
                 summary_stats_data = summary_stats_df.to_dict(orient='records')
                 logger.info(f"Prepared {len(summary_stats_data)} summary stat records")
 
-    # 4. Subsample the data
+    # 5. Subsample the data
     if len(df) > sample_size:
         logger.info(f"Subsampling DataFrame from {len(df)} to {sample_size} rows.")
         plot_df = df.sample(n=sample_size, random_state=None).copy() # Use None for true randomness on each call
@@ -127,18 +178,28 @@ async def get_real_spots_data(sample_size: int = SAMPLE_SIZE, force_refresh: boo
     plot_df['reassigned'] = plot_df['chan'] != plot_df['unmixed_chan']
     logger.info(f"Added 'reassigned' column. {plot_df['reassigned'].sum()} spots were reassigned.")
 
-    # 5. Determine available channels and pairs
+    # 6. Determine available channels and pairs
     try:
-        channel_pairs = get_channel_pairs(plot_df)
+        # If spot_channels_from_manifest is available, use it. Otherwise, fallback to get_channel_pairs.
+        if spot_channels_from_manifest:
+            # Assuming spot_channels_from_manifest is a list like ['488', '514', '561']
+            channels = sorted(spot_channels_from_manifest)
+            channel_pairs = list(itertools.combinations(channels, 2))
+            logger.info(f"Using channel pairs from manifest: {channel_pairs}")
+        else:
+            # Fallback to deriving from DataFrame columns if manifest or channels are missing
+            logger.warning("Falling back to deriving channel pairs from DataFrame columns.")
+            channel_pairs = get_channel_pairs(plot_df)
+
         if not channel_pairs:
-             logger.error("Could not determine channel pairs from DataFrame columns.")
+             logger.error("Could not determine channel pairs from manifest or DataFrame columns.")
              return JSONResponse(status_code=500, content={'error': 'Could not determine channel pairs'})
         logger.info(f"Found channel pairs: {channel_pairs}")
     except Exception as e:
         logger.error(f"Error determining channel pairs: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={'error': 'Error processing channel data'})
 
-    # 6. Prepare data for JSON response
+    # 7. Prepare data for JSON response
     # Select columns needed for plotting and table population
     required_cols = ['spot_id', 'chan', 'r', 'dist', 'unmixed_chan', 'reassigned']
     intensity_cols = [f'chan_{c}_intensity' for pair in channel_pairs for c in pair]
@@ -176,13 +237,31 @@ async def get_real_spots_data(sample_size: int = SAMPLE_SIZE, force_refresh: boo
         spot_details = {}
         logger.warning("Could not create spot_details: required columns not found in DataFrame")
 
-    # 7. Generate the fused S3 paths
-    base_fuse_path = "s3://aind-open-data/HCR_736963_2024-12-07_13-00-00/fused"
-    chs = ["405", "488", "514", "561", "594"]
-    fused_s3_paths = [f"{base_fuse_path}/channel_{ch}.zarr" for ch in chs]
+    # 8. Generate the fused S3 paths
+    # base_fuse_path is derived from PROCESSED_DATA_ROOT_PREFIX
+    base_fuse_path = f"s3://{REAL_SPOTS_BUCKET}/{PROCESSED_DATA_ROOT_PREFIX}/image_tile_fusing/fused"
+
+    # Use spot_channels_from_manifest if available, otherwise fallback to a default or error
+    if spot_channels_from_manifest:
+        chs_for_fused_paths = spot_channels_from_manifest
+    else:
+        # Fallback: if manifest channels are not available, what should we do?
+        # Option 1: Use channels derived from plot_df (less reliable for *all* fused data)
+        # Option 2: Use a hardcoded default list (as it was before)
+        # Option 3: Return an error or an empty list for fused_s3_paths
+        logger.warning("Spot channels from manifest not available for generating fused paths. Using unique channels from current channel_pairs as a fallback.")
+        # Derive unique channels from the current channel_pairs (which might also be a fallback)
+        if channel_pairs:
+             unique_channels_from_pairs = sorted(list(set(itertools.chain(*channel_pairs))))
+             chs_for_fused_paths = unique_channels_from_pairs
+        else:
+             logger.error("Cannot determine channels for fused paths. Manifest missing and no channel pairs found.")
+             chs_for_fused_paths = [] # Or handle as an error state
+
+    fused_s3_paths = [f"{base_fuse_path}/channel_{ch}.zarr" for ch in chs_for_fused_paths]
     logger.info(f"Generated fused S3 paths: {fused_s3_paths}")
 
-    # 8. Convert DataFrame to list of records (dictionaries)
+    # 9. Convert DataFrame to list of records (dictionaries)
     try:
         data_for_frontend = plot_df_subset.to_dict(orient='records')
         logger.info(f"Prepared {len(data_for_frontend)} records for frontend.")
@@ -190,13 +269,13 @@ async def get_real_spots_data(sample_size: int = SAMPLE_SIZE, force_refresh: boo
         logger.error(f"Error converting DataFrame to dict: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={'error': 'Error formatting data'})
 
-    # 9. Prepare ratios data for JSON response
+    # 10. Prepare ratios data for JSON response
     ratios_json = None
     if ratios_data is not None:
         ratios_json = ratios_data.tolist()
         logger.info(f"Converted ratios matrix to JSON serializable format")
 
-    # 10. Build the response
+    # 11. Build the response
     response = {
         "channel_pairs": channel_pairs,
         "spots_data": data_for_frontend,

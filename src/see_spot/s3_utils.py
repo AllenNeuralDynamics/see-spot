@@ -5,6 +5,7 @@ from see_spot.s3_handler import s3_handler
 from pathlib import Path
 import fnmatch
 import io
+import json # Added for JSON parsing
 
 import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -249,4 +250,45 @@ def load_pkl_from_s3(bucket: str, key: str) -> Optional[pd.DataFrame]:
          return None
     except Exception as e:
         logger.error(f"Error loading pickle data from {local_file_path}: {e}", exc_info=True)
+        return None
+
+def load_processing_manifest_from_s3(bucket: str, key: str) -> Optional[Dict[str, Any]]:
+    """
+    Loads a processing_manifest.json file from S3.
+
+    Parameters:
+    -----------
+    bucket: str
+        S3 bucket name
+    key: str
+        S3 key for the processing_manifest.json file
+
+    Returns:
+    --------
+    Optional[Dict[str, Any]]
+        Dictionary containing the manifest data or None if loading failed
+    """
+    if not key:
+        logger.warning("No processing manifest file key provided")
+        return None
+
+    logger.info(f"Loading processing manifest from s3://{bucket}/{key}")
+
+    try:
+        # Download the file content
+        content = s3_handler.get_object(key=key, bucket_name=bucket)
+        if content is None:
+            logger.error(f"Failed to get object content for {key}")
+            return None
+
+        # Parse the JSON content
+        manifest_data = json.loads(content.decode('utf-8'))
+        logger.info(f"Successfully loaded and parsed processing manifest: {key}")
+        return manifest_data
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Error decoding JSON from {key}: {e}", exc_info=True)
+        return None
+    except Exception as e:
+        logger.error(f"Error loading processing manifest file: {e}", exc_info=True)
         return None
