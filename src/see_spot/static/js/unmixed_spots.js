@@ -53,8 +53,10 @@ document.addEventListener('DOMContentLoaded', function () {
     // Define color mapping for unmixed channels
     const COLORS = {
         '488': '#4CAF50',    // Green
-        '514': '#FFC107',    // Amber
-        '561': '#F44336',    // Red
+        '514': '#F44336',    // Red
+        '561': '#2196F3',    // Blue
+        '594': '#00BCD4',    // Cyan
+        '638': '#9C27B0',    // Purple
         'ambiguous': '#9E9E9E', // Grey
         'none': '#607D8B',    // Blue Grey
         'default': '#2196F3'  // Blue (default)
