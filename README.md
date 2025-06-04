@@ -14,7 +14,10 @@
 + `source .venv/bin/activate`
 + `cd src`
 + `uvicorn see_spot.app:app --host 0.0.0.0 --port 9999 --reload`
-
++ one liner: 
+```bash
+cd /home/matt.davis/code/see-spot && source .venv/bin/activate && cd src && uvicorn see_spot.app:app --host 0.0.0.0 --port 9999 --reload
+```
 
 ## Contributing
 

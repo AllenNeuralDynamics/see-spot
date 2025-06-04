@@ -42,6 +42,11 @@ document.addEventListener('DOMContentLoaded', function () {
     let ratiosMatrix = null; // Will store the ratios matrix from the API
     let selectedSpots = new Set();
     
+    // Neuroglancer click debounce variables
+    let lastNeuroglancerClickTime = 0;
+    let lastNeuroglancerSpotId = null;
+    const NEUROGLANCER_CLICK_DEBOUNCE_MS = 1000; // Prevent duplicate clicks within 1 second
+    
     // Large data threshold - samples above this will use optimized rendering
     const LARGE_DATA_THRESHOLD = 25001;
     
@@ -630,37 +635,6 @@ document.addEventListener('DOMContentLoaded', function () {
             }
         });
 
-        // Add specific click event for Neuroglancer mode to ensure it works even during brush selection
-        document.addEventListener('click', function(event) {
-            if (!isNeuroglancerMode) return;
-            
-            // Only handle clicks that land on the chart element and only if we're in Neuroglancer mode
-            if (event.target.closest('#main-chart')) {
-                console.log("DOM click in Neuroglancer mode detected");
-                
-                // Get the currently hovered point from ECharts
-                const hovered = myChart.getZr().handler.findHover(event.offsetX, event.offsetY);
-                
-                if (hovered && hovered.target && hovered.target.dataIndex !== undefined) {
-                    console.log("Hovered element:", hovered);
-                    
-                    // Try to get the data from the hovered element
-                    const seriesIndex = hovered.target.seriesIndex;
-                    const dataIndex = hovered.target.dataIndex;
-                    
-                    if (seriesIndex !== undefined && dataIndex !== undefined) {
-                        const series = option.series[seriesIndex];
-                        if (series && series.data && series.data[dataIndex]) {
-                            const itemData = series.data[dataIndex].value;
-                            if (itemData) {
-                                handleNeuroglancerClick(itemData);
-                            }
-                        }
-                    }
-                }
-            }
-        });
-
         // Brush (lasso) selection event
         myChart.on('brushSelected', function (params) {
             lassoSelectedData = [];
@@ -796,6 +770,19 @@ document.addEventListener('DOMContentLoaded', function () {
     // Function to handle Neuroglancer mode click
     function handleNeuroglancerClick(itemData) {
         const spotId = itemData[4];
+        const currentTime = Date.now();
+        
+        // Check for duplicate clicks (same spot within debounce window)
+        if (lastNeuroglancerSpotId === spotId && 
+            (currentTime - lastNeuroglancerClickTime) < NEUROGLANCER_CLICK_DEBOUNCE_MS) {
+            console.log(`Ignoring duplicate neuroglancer click for spot ${spotId} (within ${NEUROGLANCER_CLICK_DEBOUNCE_MS}ms)`);
+            return;
+        }
+        
+        // Update debounce tracking
+        lastNeuroglancerClickTime = currentTime;
+        lastNeuroglancerSpotId = spotId;
+        
         console.log("Handling Neuroglancer click for spot ID:", spotId);
         
         if (spotDetails[spotId]) {

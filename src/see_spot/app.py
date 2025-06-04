@@ -45,7 +45,9 @@ REAL_SPOTS_BUCKET = "aind-open-data"
 # This will be the base for finding manifest, spots, and fused data.
 # Example: "HCR_747667_2025-04-18_13-00-00_processed_2025-05-13_23-21-01"
 #PROCESSED_DATA_ROOT_PREFIX = "HCR_747667_2025-04-18_13-00-00_processed_2025-05-13_23-21-01"
-PROCESSED_DATA_ROOT_PREFIX = "HCR_749315_2025-04-18_13-00-00_processed_2025-05-13_23-47-40"
+#PROCESSED_DATA_ROOT_PREFIX = "HCR_749315_2025-04-18_13-00-00_processed_2025-05-13_23-47-40"
+#PROCESSED_DATA_ROOT_PREFIX = "HCR_749315_2025-04-25_13-00-00_processed_2025-05-17_22-13-57"
+PROCESSED_DATA_ROOT_PREFIX = "HCR_749315_2025-05-08_14-00-00_processed_2025-05-17_22-15-31"
 # REAL_SPOTS_PREFIX will be derived: PROCESSED_DATA_ROOT_PREFIX + "/image_spot_spectral_unmixing/"
 # REAL_SPOTS_PATTERN is static: "unmixed_spots_*.pkl"
 SAMPLE_SIZE = 10000 # Number of points to send to frontend
