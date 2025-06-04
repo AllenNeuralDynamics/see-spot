@@ -1027,11 +1027,22 @@ document.addEventListener('DOMContentLoaded', function () {
             },
             xAxis: {
                 type: 'category',
-                data: channelLabels
+                data: channelLabels.map(label => {
+                    const [channel, gene] = label.split(' (');
+                    return gene ? `${channel}\n(${gene}` : channel;
+                }),
+                axisLabel: {
+                    //rotate: 90
+                }
             },
             yAxis: {
                 type: 'value',
-                name: 'Number of Spots'
+                name: 'Number of Spots',
+                axisLabel: {
+                    formatter: function(value) {
+                        return value.toExponential(1);
+                    }
+                }
             },
             series: [
                 {
@@ -1077,7 +1088,6 @@ document.addEventListener('DOMContentLoaded', function () {
         summaryBarChart.setOption(barOption);
         summaryBarChart.resize();
     }
-    
     // Function to update the summary heatmap
     function updateSummaryHeatmap() {
         if (!ratiosMatrix || ratiosMatrix.length === 0) {
@@ -1188,7 +1198,7 @@ document.addEventListener('DOMContentLoaded', function () {
     // Initialize the future chart with a placeholder
     futureChart.setOption({
         title: {
-            text: 'Future Visualization',
+            text: 'Future Visualization \n (not implemented)',
             left: 'center',
             top: 'middle',
             textStyle: {
