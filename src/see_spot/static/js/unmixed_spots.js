@@ -62,6 +62,251 @@ document.addEventListener('DOMContentLoaded', function () {
         'default': '#2196F3'  // Blue (default)
     };
 
+    // Dataset management variables and elements
+    const datasetNameInput = document.getElementById('dataset_name_input');
+    const downloadDatasetBtn = document.getElementById('download_dataset_btn');
+    const datasetTableBody = document.getElementById('dataset_table_body');
+    const loadDatasetBtn = document.getElementById('load_dataset_btn');
+    const redownloadDatasetBtn = document.getElementById('redownload_dataset_btn');
+    let selectedDataset = null;
+    let datasetList = [];
+
+    // Dataset management functions
+    function loadDatasetList() {
+        fetch('/api/datasets')
+            .then(response => response.json())
+            .then(data => {
+                if (data.datasets) {
+                    datasetList = data.datasets;
+                    updateDatasetTable();
+                } else {
+                    console.error('Failed to load dataset list:', data);
+                }
+            })
+            .catch(error => {
+                console.error('Error loading dataset list:', error);
+                showDatasetMessage('Error loading dataset list: ' + error.message, 'error');
+            });
+    }
+
+    function updateDatasetTable() {
+        datasetTableBody.innerHTML = '';
+        
+        datasetList.forEach(dataset => {
+            const row = document.createElement('tr');
+            row.dataset.datasetName = dataset.name;
+            
+            if (dataset.is_current) {
+                row.classList.add('current-dataset');
+            }
+            
+            // Status indicator
+            let statusClass, statusText;
+            if (dataset.is_current) {
+                statusClass = 'status-current';
+                statusText = 'Current';
+            } else if (dataset.has_data) {
+                statusClass = 'status-cached';
+                statusText = 'Cached';
+            } else {
+                statusClass = 'status-missing';
+                statusText = 'Missing';
+            }
+            
+            // Truncate long dataset names for display
+            const displayName = dataset.name.length > 35 ? 
+                dataset.name.substring(0, 32) + '...' : dataset.name;
+            
+            row.innerHTML = `
+                <td title="${dataset.name}">${displayName}</td>
+                <td>${dataset.creation_date}</td>
+                <td><span class="status-indicator ${statusClass}"></span>${statusText}</td>
+            `;
+            
+            row.addEventListener('click', () => selectDataset(dataset.name, row));
+            datasetTableBody.appendChild(row);
+        });
+    }
+
+    function selectDataset(datasetName, rowElement) {
+        // Remove previous selection
+        document.querySelectorAll('#dataset_table tbody tr').forEach(row => {
+            row.classList.remove('selected');
+        });
+        
+        // Add selection to clicked row
+        rowElement.classList.add('selected');
+        selectedDataset = datasetName;
+        
+        // Enable/disable buttons based on selection
+        const dataset = datasetList.find(d => d.name === datasetName);
+        if (dataset) {
+            loadDatasetBtn.disabled = dataset.is_current || !dataset.has_data;
+            redownloadDatasetBtn.disabled = false;
+        }
+    }
+
+    function showDatasetMessage(message, type = 'info') {
+        // Create a simple message display (you can style this further)
+        const messageDiv = document.createElement('div');
+        messageDiv.style.position = 'fixed';
+        messageDiv.style.top = '20px';
+        messageDiv.style.right = '20px';
+        messageDiv.style.padding = '10px 15px';
+        messageDiv.style.borderRadius = '4px';
+        messageDiv.style.zIndex = '10000';
+        messageDiv.style.fontSize = '14px';
+        messageDiv.style.maxWidth = '400px';
+        messageDiv.style.wordWrap = 'break-word';
+        
+        if (type === 'error') {
+            messageDiv.style.backgroundColor = '#ffebee';
+            messageDiv.style.color = '#c62828';
+            messageDiv.style.border = '1px solid #ef5350';
+        } else if (type === 'success') {
+            messageDiv.style.backgroundColor = '#e8f5e9';
+            messageDiv.style.color = '#2e7d32';
+            messageDiv.style.border = '1px solid #4caf50';
+        } else {
+            messageDiv.style.backgroundColor = '#e3f2fd';
+            messageDiv.style.color = '#1565c0';
+            messageDiv.style.border = '1px solid #2196f3';
+        }
+        
+        messageDiv.textContent = message;
+        document.body.appendChild(messageDiv);
+        
+        // Remove after 5 seconds
+        setTimeout(() => {
+            if (messageDiv.parentNode) {
+                messageDiv.parentNode.removeChild(messageDiv);
+            }
+        }, 5000);
+    }
+
+    // Dataset management event listeners
+    downloadDatasetBtn.addEventListener('click', function() {
+        const datasetName = datasetNameInput.value.trim();
+        if (!datasetName) {
+            showDatasetMessage('Please enter a dataset name', 'error');
+            return;
+        }
+        
+        downloadDatasetBtn.disabled = true;
+        downloadDatasetBtn.textContent = 'Downloading...';
+        
+        fetch('/api/datasets/download', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ dataset_name: datasetName })
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                showDatasetMessage(`Successfully downloaded dataset: ${data.dataset_name}`, 'success');
+                datasetNameInput.value = '';
+                loadDatasetList(); // Refresh the list
+            } else {
+                showDatasetMessage(data.error || 'Failed to download dataset', 'error');
+                if (data.checked_path) {
+                    console.log('Checked path:', data.checked_path);
+                }
+            }
+        })
+        .catch(error => {
+            console.error('Error downloading dataset:', error);
+            showDatasetMessage('Error downloading dataset: ' + error.message, 'error');
+        })
+        .finally(() => {
+            downloadDatasetBtn.disabled = false;
+            downloadDatasetBtn.textContent = 'Download';
+        });
+    });
+
+    loadDatasetBtn.addEventListener('click', function() {
+        if (!selectedDataset) {
+            showDatasetMessage('Please select a dataset first', 'error');
+            return;
+        }
+        
+        loadDatasetBtn.disabled = true;
+        loadDatasetBtn.textContent = 'Loading...';
+        
+        fetch('/api/datasets/set-active', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ dataset_name: selectedDataset })
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                showDatasetMessage(`Successfully loaded dataset: ${data.dataset_name}`, 'success');
+                loadDatasetList(); // Refresh the list to show new current dataset
+                
+                // Refresh the main data display
+                setTimeout(() => {
+                    refreshData(true);
+                }, 1000);
+            } else {
+                showDatasetMessage(data.error || 'Failed to load dataset', 'error');
+            }
+        })
+        .catch(error => {
+            console.error('Error loading dataset:', error);
+            showDatasetMessage('Error loading dataset: ' + error.message, 'error');
+        })
+        .finally(() => {
+            loadDatasetBtn.disabled = false;
+            loadDatasetBtn.textContent = 'Load Dataset';
+        });
+    });
+
+    redownloadDatasetBtn.addEventListener('click', function() {
+        if (!selectedDataset) {
+            showDatasetMessage('Please select a dataset first', 'error');
+            return;
+        }
+        
+        if (!confirm(`Are you sure you want to redownload "${selectedDataset}"? This will overwrite any cached data.`)) {
+            return;
+        }
+        
+        redownloadDatasetBtn.disabled = true;
+        redownloadDatasetBtn.textContent = 'Redownloading...';
+        
+        fetch('/api/datasets/download', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ dataset_name: selectedDataset })
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                showDatasetMessage(`Successfully redownloaded dataset: ${data.dataset_name}`, 'success');
+                loadDatasetList(); // Refresh the list
+            } else {
+                showDatasetMessage(data.error || 'Failed to redownload dataset', 'error');
+            }
+        })
+        .catch(error => {
+            console.error('Error redownloading dataset:', error);
+            showDatasetMessage('Error redownloading dataset: ' + error.message, 'error');
+        })
+        .finally(() => {
+            redownloadDatasetBtn.disabled = false;
+            redownloadDatasetBtn.textContent = 'Redownload';
+        });
+    });
+
+    // Initialize dataset management
+    loadDatasetList();
+
     // Update current label when input changes
     labelInput.addEventListener('input', function() {
         currentLabel = labelInput.value.trim();

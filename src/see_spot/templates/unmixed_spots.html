@@ -78,7 +78,7 @@
             border-radius: 4px;
             overflow-y: auto; /* Add scrolling to controls if they get too tall */
             flex-shrink: 0; /* Prevent shrinking */
-            height: 420px; /* Fixed height */
+            height: 305px; /* Reduced height to accommodate dataset panel */
         }
         #spots_controls > div { 
              display: flex;
@@ -109,6 +109,166 @@
         #current_channel_display {
             font-size: 16px;
             font-weight: bold;
+        }
+        
+        /* Dataset Management Panel Styles */
+        #dataset_panel {
+            background-color: #f0f8ff;
+            border: 1px solid #b0d4f1;
+            border-radius: 6px;
+            padding: 12px;
+            margin-bottom: 15px;
+            height: 300px;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        #dataset_panel h4 {
+            margin: 0 0 10px 0;
+            color: #2c5aa0;
+            font-size: 14px;
+        }
+        
+        #dataset_input_section {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 10px;
+            align-items: center;
+        }
+        
+        #dataset_name_input {
+            flex: 1;
+            padding: 6px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-size: 12px;
+        }
+        
+        #download_dataset_btn {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+        
+        #download_dataset_btn:hover {
+            background-color: #45a049;
+        }
+        
+        #download_dataset_btn:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        
+        #dataset_table_container {
+            flex: 1;
+            overflow-y: auto;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            margin-bottom: 10px;
+        }
+        
+        #dataset_table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+        }
+        
+        #dataset_table th {
+            background-color: #e8f4f8;
+            padding: 6px 8px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+            font-weight: bold;
+            position: sticky;
+            top: 0;
+        }
+        
+        #dataset_table td {
+            padding: 6px 8px;
+            border-bottom: 1px solid #eee;
+        }
+        
+        #dataset_table tbody tr {
+            cursor: pointer;
+        }
+        
+        #dataset_table tbody tr:hover {
+            background-color: #f0f8ff;
+        }
+        
+        #dataset_table tbody tr.selected {
+            background-color: #cce7ff;
+            font-weight: bold;
+        }
+        
+        #dataset_table tbody tr.current-dataset {
+            background-color: #e8f5e9;
+        }
+        
+        #dataset_actions {
+            display: flex;
+            gap: 8px;
+        }
+        
+        #load_dataset_btn, #redownload_dataset_btn {
+            flex: 1;
+            padding: 6px 12px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+        
+        #load_dataset_btn {
+            background-color: #2196F3;
+            color: white;
+        }
+        
+        #load_dataset_btn:hover {
+            background-color: #1976D2;
+        }
+        
+        #load_dataset_btn:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        
+        #redownload_dataset_btn {
+            background-color: #FF9800;
+            color: white;
+        }
+        
+        #redownload_dataset_btn:hover {
+            background-color: #F57C00;
+        }
+        
+        #redownload_dataset_btn:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        
+        .status-indicator {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 5px;
+        }
+        
+        .status-current {
+            background-color: #4CAF50;
+        }
+        
+        .status-cached {
+            background-color: #2196F3;
+        }
+        
+        .status-missing {
+            background-color: #f44336;
         }
     </style>
 </head>
@@ -168,6 +328,33 @@
         </div>
         
         <div id="spots_details">
+            <!-- Dataset Management Panel -->
+            <div id="dataset_panel">
+                <h4>📊 Dataset Management</h4>
+                <div id="dataset_input_section">
+                    <input type="text" id="dataset_name_input" placeholder="Enter dataset name (e.g., HCR_XXXXX_YYYY-MM-DD_HH-MM-SS_processed_YYYY-MM-DD_HH-MM-SS)">
+                    <button id="download_dataset_btn">Download</button>
+                </div>
+                <div id="dataset_table_container">
+                    <table id="dataset_table">
+                        <thead>
+                            <tr>
+                                <th>Dataset Name</th>
+                                <th>Date</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="dataset_table_body">
+                            <!-- Dataset rows will be populated here -->
+                        </tbody>
+                    </table>
+                </div>
+                <div id="dataset_actions">
+                    <button id="load_dataset_btn" disabled>Load Dataset</button>
+                    <button id="redownload_dataset_btn" disabled>Redownload</button>
+                </div>
+            </div>
+            
             <div id="spots_controls">
                 <div id="channel_navigation">
                     <button id="prev_channel_pair">&lt;</button>

@@ -341,6 +341,171 @@ async def create_neuroglancer_link(request: Request):
             content={"error": f"Failed to create neuroglancer link: {str(e)}"}
         )
 
+@app.get("/api/datasets")
+async def list_datasets():
+    """List all available datasets in the local cache."""
+    try:
+        cache_path = Path("/s3-cache") / REAL_SPOTS_BUCKET
+        datasets = []
+        
+        if cache_path.exists():
+            for dataset_dir in cache_path.iterdir():
+                if dataset_dir.is_dir() and not dataset_dir.name.startswith('.'):
+                    # Get directory creation time
+                    stat = dataset_dir.stat()
+                    creation_time = datetime.fromtimestamp(stat.st_mtime)
+                    
+                    # Check if dataset has the required structure
+                    spots_dir = dataset_dir / "image_spot_spectral_unmixing"
+                    has_data = spots_dir.exists()
+                    
+                    datasets.append({
+                        "name": dataset_dir.name,
+                        "creation_date": creation_time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "has_data": has_data,
+                        "is_current": dataset_dir.name == PROCESSED_DATA_ROOT_PREFIX
+                    })
+        
+        # Sort by creation date (newest first)
+        datasets.sort(key=lambda x: x["creation_date"], reverse=True)
+        
+        return {"datasets": datasets}
+    
+    except Exception as e:
+        logger.error(f"Error listing datasets: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+@app.post("/api/datasets/download")
+async def download_dataset(request: Request):
+    """Download a dataset from S3 to local cache."""
+    try:
+        data = await request.json()
+        dataset_name = data.get("dataset_name")
+        
+        if not dataset_name:
+            return JSONResponse(status_code=400, content={"error": "Dataset name is required"})
+        
+        # Check if dataset exists on S3 by looking for the processing manifest
+        manifest_key = f"{dataset_name}/derived/processing_manifest.json"
+        
+        logger.info(f"Checking if dataset exists: s3://{REAL_SPOTS_BUCKET}/{manifest_key}")
+        
+        # Try to get the manifest to verify the dataset exists
+        manifest_content = s3_handler.get_object(key=manifest_key, bucket_name=REAL_SPOTS_BUCKET)
+        
+        if manifest_content is None:
+            return JSONResponse(
+                status_code=404, 
+                content={
+                    "error": f"Dataset not found on S3",
+                    "checked_path": f"s3://{REAL_SPOTS_BUCKET}/{manifest_key}"
+                }
+            )
+        
+        # Download the processing manifest first
+        manifest_local_path = s3_handler.download_file(
+            key=manifest_key,
+            bucket_name=REAL_SPOTS_BUCKET,
+            use_cache=True
+        )
+        
+        if manifest_local_path is None:
+            return JSONResponse(status_code=500, content={"error": "Failed to download processing manifest"})
+        
+        # Download the unmixed spots file
+        spots_key = f"{dataset_name}/image_spot_spectral_unmixing/"
+        spots_file = find_unmixed_spots_file(REAL_SPOTS_BUCKET, spots_key, "unmixed_spots_*.pkl")
+        
+        if not spots_file:
+            return JSONResponse(
+                status_code=404, 
+                content={
+                    "error": "Spots data file not found",
+                    "checked_path": f"s3://{REAL_SPOTS_BUCKET}/{spots_key}unmixed_spots_*.pkl"
+                }
+            )
+        
+        # Download the spots file
+        spots_local_path = s3_handler.download_file(
+            key=spots_file,
+            bucket_name=REAL_SPOTS_BUCKET,
+            use_cache=True
+        )
+        
+        if spots_local_path is None:
+            return JSONResponse(status_code=500, content={"error": "Failed to download spots data"})
+        
+        # Try to download related files (ratios and summary stats)
+        related_files = find_related_files(REAL_SPOTS_BUCKET, spots_key, spots_file)
+        
+        downloaded_files = [str(manifest_local_path), str(spots_local_path)]
+        
+        if related_files['ratios']:
+            ratios_local_path = s3_handler.download_file(
+                key=related_files['ratios'],
+                bucket_name=REAL_SPOTS_BUCKET,
+                use_cache=True
+            )
+            if ratios_local_path:
+                downloaded_files.append(str(ratios_local_path))
+        
+        if related_files['summary_stats']:
+            stats_local_path = s3_handler.download_file(
+                key=related_files['summary_stats'],
+                bucket_name=REAL_SPOTS_BUCKET,
+                use_cache=True
+            )
+            if stats_local_path:
+                downloaded_files.append(str(stats_local_path))
+        
+        return {
+            "success": True,
+            "dataset_name": dataset_name,
+            "downloaded_files": downloaded_files
+        }
+    
+    except Exception as e:
+        logger.error(f"Error downloading dataset: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+@app.post("/api/datasets/set-active")
+async def set_active_dataset(request: Request):
+    """Set the active dataset for the application."""
+    try:
+        data = await request.json()
+        dataset_name = data.get("dataset_name")
+        
+        if not dataset_name:
+            return JSONResponse(status_code=400, content={"error": "Dataset name is required"})
+        
+        # Verify the dataset exists locally
+        cache_path = Path("/s3-cache") / REAL_SPOTS_BUCKET / dataset_name
+        if not cache_path.exists():
+            return JSONResponse(status_code=404, content={"error": "Dataset not found in local cache"})
+        
+        # Update the global variable
+        global PROCESSED_DATA_ROOT_PREFIX
+        PROCESSED_DATA_ROOT_PREFIX = dataset_name
+        
+        # Clear the cache to force reload with new dataset
+        df_cache["data"] = None
+        df_cache["last_loaded"] = None
+        df_cache["target_key"] = None
+        df_cache["processing_manifest"] = None
+        df_cache["spot_channels_from_manifest"] = None
+        
+        logger.info(f"Active dataset changed to: {dataset_name}")
+        
+        return {
+            "success": True,
+            "dataset_name": dataset_name,
+            "message": "Active dataset updated successfully"
+        }
+    
+    except Exception as e:
+        logger.error(f"Error setting active dataset: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
 @app.get("/")
 @app.get("/unmixed-spots")
 async def unmixed_spots_page(request: Request):
