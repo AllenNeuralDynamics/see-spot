@@ -7,7 +7,8 @@
 ![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen?logo=codecov)
 ![Python](https://img.shields.io/badge/python->=3.10-blue?logo=python)
 
-
+## 
++ run (other network users): `uvicorn see_spot.app:app --reload --host 0.0.0.0`
 
 ## Usage
  - To use this template, click the green `Use this template` button and `Create new repository`.
