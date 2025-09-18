@@ -17,8 +17,8 @@ from typing import List, Tuple, Dict, Any
 from see_spot.s3_handler import s3_handler
 from see_spot.s3_utils import (
     find_unmixed_spots_file, find_related_files, 
-    load_pkl_from_s3, load_ratios_from_s3, load_summary_stats_from_s3,
-    load_processing_manifest_from_s3
+    load_ratios_from_s3, load_summary_stats_from_s3,
+    load_processing_manifest_from_s3, load_and_merge_spots_from_s3
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -76,7 +76,6 @@ async def get_real_spots_data(sample_size: int = SAMPLE_SIZE, force_refresh: boo
         logger.info(f"Using cached DataFrame from {df_cache['last_loaded']}. Shape: {df_cache['data'].shape}")
         df = df_cache["data"]
         # We still need to find related files if they weren't cached
-        target_key = df_cache.get("target_key")
         # Load manifest and channels from cache if available, or re-fetch
         processing_manifest = df_cache.get("processing_manifest")
         spot_channels_from_manifest = df_cache.get("spot_channels_from_manifest")
@@ -113,29 +112,25 @@ async def get_real_spots_data(sample_size: int = SAMPLE_SIZE, force_refresh: boo
             logger.info(f"Loaded spot channels from manifest: {spot_channels_from_manifest}")
 
 
-        # 2. Find the data file
+        # 2. Find and load the merged data
         unmixed_spots_prefix = f"{PROCESSED_DATA_ROOT_PREFIX}/image_spot_spectral_unmixing/"
-        unmixed_spots_pattern = "unmixed_spots_*.pkl"
-        target_key = find_unmixed_spots_file(
-            REAL_SPOTS_BUCKET, unmixed_spots_prefix, unmixed_spots_pattern
-        )
-        if not target_key:
-            logger.error(f"Could not find spots file matching pattern '{unmixed_spots_pattern}' in '{unmixed_spots_prefix}'.")
-            return JSONResponse(status_code=404, content={'error': 'Spots data file not found on S3'})
-
-        # 3. Load the data (uses caching via download_file)
-        logger.info(f"Loading data from s3://{REAL_SPOTS_BUCKET}/{target_key}")
+        
+        logger.info(f"Loading merged spots data for dataset: {PROCESSED_DATA_ROOT_PREFIX}")
         try:
-            df = load_pkl_from_s3(REAL_SPOTS_BUCKET, target_key)
+            df = load_and_merge_spots_from_s3(
+                REAL_SPOTS_BUCKET, 
+                PROCESSED_DATA_ROOT_PREFIX, 
+                unmixed_spots_prefix
+            )
             if df is None:
-                logger.error("Failed to load DataFrame from S3/cache.")
+                logger.error("Failed to load merged DataFrame from S3/cache.")
                 return JSONResponse(status_code=500, content={'error': 'Failed to load spots data'})
-            logger.info(f"Loaded DataFrame shape: {df.shape}")
+            logger.info(f"Loaded merged DataFrame shape: {df.shape}")
 
             # Update cache
             df_cache["data"] = df
             df_cache["last_loaded"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            df_cache["target_key"] = target_key
+            df_cache["target_key"] = f"{unmixed_spots_prefix}merged"  # Dummy key for cache tracking
             df_cache["processing_manifest"] = processing_manifest # Cache manifest
             df_cache["spot_channels_from_manifest"] = spot_channels_from_manifest # Cache channels
             logger.info(f"Updated DataFrame cache at {df_cache['last_loaded']}")
@@ -144,14 +139,19 @@ async def get_real_spots_data(sample_size: int = SAMPLE_SIZE, force_refresh: boo
             return JSONResponse(status_code=500, content={'error': 'Error loading spots data'})
 
     # 4. Find and load related files (ratios and summary_stats)
-    # Related files are expected to be in the same directory as the target_key (unmixed_spots file)
+    # Related files are expected to be in the same directory as the spots files
     ratios_data = None
     summary_stats_data = None
 
-    if target_key:
-        # The prefix for related files should be the directory of the target_key
-        related_files_prefix = str(Path(target_key).parent) + "/" # Ensure trailing slash
-        related_files = find_related_files(REAL_SPOTS_BUCKET, related_files_prefix, target_key)
+    # The prefix for related files should be the spots directory
+    related_files_prefix = unmixed_spots_prefix
+    # We need to find a target key for related files - use the unmixed spots file
+    unmixed_target_key = find_unmixed_spots_file(
+        REAL_SPOTS_BUCKET, unmixed_spots_prefix, "unmixed_spots_*.pkl"
+    )
+    
+    if unmixed_target_key:
+        related_files = find_related_files(REAL_SPOTS_BUCKET, related_files_prefix, unmixed_target_key)
         logger.info(f"Searching for related files in '{related_files_prefix}'. Found: {related_files}")
 
         # Load ratios file if found
@@ -412,7 +412,7 @@ async def download_dataset(request: Request):
         if manifest_local_path is None:
             return JSONResponse(status_code=500, content={"error": "Failed to download processing manifest"})
         
-        # Download the unmixed spots file
+        # Download the unmixed spots file (for merging and related files)
         spots_key = f"{dataset_name}/image_spot_spectral_unmixing/"
         spots_file = find_unmixed_spots_file(REAL_SPOTS_BUCKET, spots_key, "unmixed_spots_*.pkl")
         
@@ -425,20 +425,26 @@ async def download_dataset(request: Request):
                 }
             )
         
-        # Download the spots file
-        spots_local_path = s3_handler.download_file(
-            key=spots_file,
-            bucket_name=REAL_SPOTS_BUCKET,
-            use_cache=True
-        )
-        
-        if spots_local_path is None:
-            return JSONResponse(status_code=500, content={"error": "Failed to download spots data"})
+        # Try to create the merged parquet file by calling our new merge function
+        try:
+            merged_df = load_and_merge_spots_from_s3(REAL_SPOTS_BUCKET, dataset_name, spots_key)
+            if merged_df is not None:
+                logger.info(f"Successfully created merged parquet file for dataset {dataset_name}")
+            else:
+                logger.warning(f"Could not create merged parquet file for dataset {dataset_name}")
+        except Exception as e:
+            logger.warning(f"Error creating merged parquet file: {e}")
+            # Continue anyway - the individual files will still be available
         
         # Try to download related files (ratios and summary stats)
         related_files = find_related_files(REAL_SPOTS_BUCKET, spots_key, spots_file)
         
-        downloaded_files = [str(manifest_local_path), str(spots_local_path)]
+        downloaded_files = [str(manifest_local_path)]
+        
+        # Add the parquet file to downloaded files if it was created
+        parquet_file = Path("/s3-cache") / REAL_SPOTS_BUCKET / dataset_name / f"{dataset_name}.parquet"
+        if parquet_file.exists():
+            downloaded_files.append(str(parquet_file))
         
         if related_files['ratios']:
             ratios_local_path = s3_handler.download_file(

@@ -8,8 +8,209 @@ import io
 import json # Added for JSON parsing
 
 import logging
+import tempfile
+import os
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+def merge_spots_tables(spots_mixed, spots_unmixed):
+    """Merge mixed and unmixed spots tables.
+    
+    Args:
+        spots_mixed (pd.DataFrame): Mixed spots DataFrame
+        spots_unmixed (pd.DataFrame): Unmixed spots DataFrame
+        
+    Returns:
+        pd.DataFrame: Merged DataFrame with unmixed_removed column and spot_id
+    """
+    # Drop spot_id column from both DataFrames
+    mixed_clean = spots_mixed.drop(columns=['spot_id'], errors='ignore').copy()
+    unmixed_clean = spots_unmixed.drop(columns=['spot_id'], errors='ignore').copy()
+    
+    # Get columns that are unique to unmixed table
+    mixed_cols = set(mixed_clean.columns)
+    unmixed_cols = set(unmixed_clean.columns)
+    unique_unmixed_cols = list(unmixed_cols - mixed_cols)
+    
+    # Keep only merge keys and unique columns from unmixed
+    merge_keys = ['chan', 'chan_spot_id']
+    unmixed_subset = unmixed_clean[merge_keys + unique_unmixed_cols].copy()
+    
+    # Perform left merge
+    merged = mixed_clean.merge(unmixed_subset, on=merge_keys, how='left')
+    
+    # Add unmixed_removed column - True where any unique unmixed column is NaN
+    if unique_unmixed_cols:
+        merged['unmixed_removed'] = merged[unique_unmixed_cols].isnull().all(axis=1)
+    else:
+        merged['unmixed_removed'] = False
+    
+    # Create spot_id column based on the index
+    merged['spot_id'] = merged.index
+    
+    return merged
+
+
+def find_mixed_spots_file(bucket: str, prefix: str, pattern: str) -> Optional[str]:
+    """Finds the first mixed spots file matching the pattern within the prefix."""
+    logger.info(f"Searching for mixed spots pattern '{pattern}' in bucket '{bucket}' with prefix '{prefix}'...")
+    try:
+        # List objects - consider increasing max_keys if many files share the prefix
+        objects = s3_handler.list_objects(bucket_name=bucket, prefix=prefix, max_keys=200)
+        if not objects:
+            logger.warning(f"No objects found with prefix '{prefix}'.")
+            return None
+
+        found_files = []
+        for key in objects:
+            # Use Pathlib to easily get the filename part of the key
+            filename = Path(key).name
+            if fnmatch.fnmatch(filename, pattern):
+                logger.info(f"Found matching mixed spots file: {key}")
+                found_files.append(key)
+
+        if not found_files:
+            logger.warning(f"No mixed spots files matching pattern '{pattern}' found within the first {len(objects)} objects listed under prefix '{prefix}'.")
+            return None
+
+        if len(found_files) > 1:
+             logger.warning(f"Multiple mixed spots files ({len(found_files)}) matching pattern found. Using the first one: {found_files[0]}")
+
+        return found_files[0] # Return the full key of the first match
+
+    except Exception as e:
+        logger.error(f"Error listing or searching objects: {e}", exc_info=True) # Log traceback
+        return None
+
+
+def get_base_pattern_from_unmixed(unmixed_key: str) -> str:
+    """Extract the round pattern (e.g., R3) from unmixed_spots_R3_minDist_3.pkl to find mixed_spots_R3.pkl"""
+    filename = Path(unmixed_key).name
+    # Extract pattern like R3 from unmixed_spots_R3_minDist_3.pkl
+    parts = filename.split('_')
+    for part in parts:
+        if part.startswith('R') and part[1:].isdigit():
+            return part
+    return 'R3'  # Default fallback
+
+
+def load_and_merge_spots_from_s3(bucket: str, dataset_name: str, unmixed_spots_prefix: str) -> Optional[pd.DataFrame]:
+    """
+    Load both mixed and unmixed spots files, merge them, cache as parquet, and return merged DataFrame.
+    
+    Args:
+        bucket: S3 bucket name
+        dataset_name: Dataset name (used for parquet filename)
+        unmixed_spots_prefix: S3 prefix where spots files are located
+        
+    Returns:
+        Merged DataFrame or None if loading failed
+    """
+    cache_dir = Path("/s3-cache") / bucket / dataset_name
+    parquet_file = cache_dir / f"{dataset_name}.parquet"
+    
+    # Check if merged parquet file already exists
+    if parquet_file.exists():
+        logger.info(f"Loading merged data from cached parquet: {parquet_file}")
+        try:
+            df = pd.read_parquet(parquet_file)
+            # Filter for valid spots and return
+            df_valid = df[df['valid_spot'] == True]
+            logger.info(f"Loaded DataFrame from parquet. Shape: {df_valid.shape}")
+            return df_valid
+        except Exception as e:
+            logger.error(f"Error loading parquet file: {e}", exc_info=True)
+            # Fall through to regenerate the file
+    
+    # Need to download, merge, and cache
+    logger.info(f"Parquet file not found or corrupted. Downloading and merging spots files...")
+    
+    # 1. Find unmixed spots file
+    unmixed_key = find_unmixed_spots_file(bucket, unmixed_spots_prefix, "unmixed_spots_*.pkl")
+    if not unmixed_key:
+        logger.error(f"Could not find unmixed spots file in {unmixed_spots_prefix}")
+        return None
+    
+    # 2. Find mixed spots file based on pattern from unmixed file
+    base_pattern = get_base_pattern_from_unmixed(unmixed_key)
+    mixed_pattern = f"mixed_spots_{base_pattern}.pkl"
+    mixed_key = find_mixed_spots_file(bucket, unmixed_spots_prefix, mixed_pattern)
+    if not mixed_key:
+        logger.error(f"Could not find mixed spots file matching pattern {mixed_pattern} in {unmixed_spots_prefix}")
+        return None
+    
+    logger.info(f"Found unmixed file: {unmixed_key}")
+    logger.info(f"Found mixed file: {mixed_key}")
+    
+    # 3. Download both files to /tmp
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_dir_path = Path(tmp_dir)
+        
+        # Download unmixed file
+        unmixed_tmp_path = tmp_dir_path / f"unmixed_{os.getpid()}.pkl"
+        logger.info(f"Downloading unmixed file to {unmixed_tmp_path}")
+        unmixed_local = s3_handler.download_file(
+            key=unmixed_key,
+            bucket_name=bucket,
+            local_path=str(unmixed_tmp_path),
+            use_cache=False
+        )
+        if not unmixed_local:
+            logger.error("Failed to download unmixed spots file")
+            return None
+        
+        # Download mixed file
+        mixed_tmp_path = tmp_dir_path / f"mixed_{os.getpid()}.pkl"
+        logger.info(f"Downloading mixed file to {mixed_tmp_path}")
+        mixed_local = s3_handler.download_file(
+            key=mixed_key,
+            bucket_name=bucket,
+            local_path=str(mixed_tmp_path),
+            use_cache=False
+        )
+        if not mixed_local:
+            logger.error("Failed to download mixed spots file")
+            return None
+        
+        # 4. Load both DataFrames
+        try:
+            logger.info("Loading unmixed spots DataFrame...")
+            df_unmixed = pd.read_pickle(unmixed_local)
+            logger.info(f"Loaded unmixed DataFrame. Shape: {df_unmixed.shape}")
+            
+            logger.info("Loading mixed spots DataFrame...")
+            df_mixed = pd.read_pickle(mixed_local)
+            logger.info(f"Loaded mixed DataFrame. Shape: {df_mixed.shape}")
+        except Exception as e:
+            logger.error(f"Error loading pickle files: {e}", exc_info=True)
+            return None
+        
+        # 5. Merge the DataFrames
+        try:
+            logger.info("Merging DataFrames...")
+            df_merged = merge_spots_tables(df_mixed, df_unmixed)
+            logger.info(f"Merged DataFrame. Shape: {df_merged.shape}")
+        except Exception as e:
+            logger.error(f"Error merging DataFrames: {e}", exc_info=True)
+            return None
+        
+        # 6. Save merged result as parquet to cache
+        try:
+            # Ensure cache directory exists
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            
+            logger.info(f"Saving merged DataFrame to parquet: {parquet_file}")
+            df_merged.to_parquet(parquet_file, compression='snappy')
+            logger.info(f"Successfully saved merged data to {parquet_file}")
+        except Exception as e:
+            logger.error(f"Error saving parquet file: {e}", exc_info=True)
+            # Continue anyway - we have the data in memory
+        
+        # 7. Filter for valid spots and return
+        df_valid = df_merged[df_merged['valid_spot'] == True]
+        logger.info(f"Returning valid spots DataFrame. Shape: {df_valid.shape}")
+        return df_valid
+
 
 def find_unmixed_spots_file(bucket: str, prefix: str, pattern: str) -> Optional[str]:
     """Finds the first S3 object key matching the pattern within the prefix."""
