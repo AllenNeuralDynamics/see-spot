@@ -21,6 +21,8 @@ document.addEventListener('DOMContentLoaded', function () {
     const highlightRemovedToggle = document.getElementById('highlight_removed_toggle');
     const highlightRemovedStatus = document.getElementById('highlight_removed_status');
     const displayChanSelect = document.getElementById('display_chan_select');
+    const validSpotToggle = document.getElementById('valid_spot_toggle');
+    const validSpotStatus = document.getElementById('valid_spot_status');
     const summaryBarChartDom = document.getElementById('summary-bar-chart');
     const summaryHeatmapDom = document.getElementById('summary-heatmap');
     const futureChartDom = document.getElementById('future-chart');
@@ -410,7 +412,8 @@ document.addEventListener('DOMContentLoaded', function () {
     
     // Fetch data function
     function fetchData(sampleSize, forceRefresh = false) {
-        const url = `/api/real_spots_data?sample_size=${sampleSize}${forceRefresh ? '&force_refresh=true' : ''}`;
+        const validSpotsOnly = validSpotToggle.checked;
+        const url = `/api/real_spots_data?sample_size=${sampleSize}${forceRefresh ? '&force_refresh=true' : ''}${validSpotsOnly ? '&valid_spots_only=true' : '&valid_spots_only=false'}`;
         console.log(`Fetching data with URL: ${url}`);
         
         fetch(url)
@@ -1314,6 +1317,26 @@ document.addEventListener('DOMContentLoaded', function () {
         
         // Update chart with new highlighting settings
         updateChart();
+    });
+
+    // Event listener for valid spot toggle
+    validSpotToggle.addEventListener('change', function() {
+        validSpotStatus.textContent = this.checked ? 'On' : 'Off';
+        
+        // Update toggle style
+        const toggleLabel = this.nextElementSibling;
+        const toggleSpan = toggleLabel.querySelector('span');
+        
+        if (this.checked) {
+            toggleLabel.style.backgroundColor = '#4CAF50'; // Green when active
+            toggleSpan.style.left = '22px';
+        } else {
+            toggleLabel.style.backgroundColor = '#ccc'; // Gray when inactive
+            toggleSpan.style.left = '2px';
+        }
+        
+        // Reload data with new filter setting
+        fetchData(currentSampleSize, false);
     });
 
     // Function to update the summary charts (bar chart and heatmap)

@@ -57,8 +57,13 @@ def get_channel_pairs(df: pl.DataFrame) -> List[Tuple[str, str]]:
     return list(itertools.combinations(channels, 2))
 
 @app.get("/api/real_spots_data")
-async def get_real_spots_data(sample_size: int = SAMPLE_SIZE, force_refresh: bool = False):
-    logger.info(f"Real spots data requested with sample size: {sample_size}, force_refresh: {force_refresh}")
+async def get_real_spots_data(
+    sample_size: int = SAMPLE_SIZE, 
+    force_refresh: bool = False, 
+    valid_spots_only: bool = False
+):
+    logger.info(f"Real spots data requested with sample size: {sample_size}, "
+                f"force_refresh: {force_refresh}, valid_spots_only: {valid_spots_only}")
 
     # Check if we can use cached DataFrame
     if not force_refresh and df_cache["data"] is not None:
@@ -105,7 +110,8 @@ async def get_real_spots_data(sample_size: int = SAMPLE_SIZE, force_refresh: boo
             df_polars = load_and_merge_spots_from_s3(
                 S3_BUCKET, 
                 DATA_PREFIX, 
-                unmixed_spots_prefix
+                unmixed_spots_prefix,
+                valid_spots_only
             )
             if df_polars is None:
                 logger.error("Failed to load merged DataFrame from S3/cache.")
@@ -343,104 +349,104 @@ async def list_datasets():
         logger.error(f"Error listing datasets: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-# @app.post("/api/datasets/download")
-# async def download_dataset(request: Request):
-#     """Download a dataset from S3 to local cache."""
-#     try:
-#         data = await request.json()
-#         dataset_name = data.get("dataset_name")
+@app.post("/api/datasets/download")
+async def download_dataset(request: Request):
+    """Download a dataset from S3 to local cache."""
+    try:
+        data = await request.json()
+        dataset_name = data.get("dataset_name")
         
-#         if not dataset_name:
-#             return JSONResponse(status_code=400, content={"error": "Dataset name is required"})
+        if not dataset_name:
+            return JSONResponse(status_code=400, content={"error": "Dataset name is required"})
         
-#         # Check if dataset exists on S3 by looking for the processing manifest
-#         manifest_key = f"{dataset_name}/derived/processing_manifest.json"
+        # Check if dataset exists on S3 by looking for the processing manifest
+        manifest_key = f"{dataset_name}/derived/processing_manifest.json"
         
-#         logger.info(f"Checking if dataset exists: s3://{S3_BUCKET}/{manifest_key}")
+        logger.info(f"Checking if dataset exists: s3://{S3_BUCKET}/{manifest_key}")
         
-#         # Try to get the manifest to verify the dataset exists
-#         manifest_content = s3_handler.get_object(key=manifest_key, bucket_name=S3_BUCKET)
+        # Try to get the manifest to verify the dataset exists
+        manifest_content = s3_handler.get_object(key=manifest_key, bucket_name=S3_BUCKET)
         
-#         if manifest_content is None:
-#             return JSONResponse(
-#                 status_code=404, 
-#                 content={
-#                     "error": f"Dataset not found on S3",
-#                     "checked_path": f"s3://{S3_BUCKET}/{manifest_key}"
-#                 }
-#             )
+        if manifest_content is None:
+            return JSONResponse(
+                status_code=404, 
+                content={
+                    "error": f"Dataset not found on S3",
+                    "checked_path": f"s3://{S3_BUCKET}/{manifest_key}"
+                }
+            )
         
-#         # Download the processing manifest first
-#         manifest_local_path = s3_handler.download_file(
-#             key=manifest_key,
-#             bucket_name=S3_BUCKET,
-#             use_cache=True
-#         )
+        # Download the processing manifest first
+        manifest_local_path = s3_handler.download_file(
+            key=manifest_key,
+            bucket_name=S3_BUCKET,
+            use_cache=True
+        )
         
-#         if manifest_local_path is None:
-#             return JSONResponse(status_code=500, content={"error": "Failed to download processing manifest"})
+        if manifest_local_path is None:
+            return JSONResponse(status_code=500, content={"error": "Failed to download processing manifest"})
         
-#         # Download the unmixed spots file (for merging and related files)
-#         spots_key = f"{dataset_name}/image_spot_spectral_unmixing/"
-#         spots_file = find_unmixed_spots_file(S3_BUCKET, spots_key, "unmixed_spots_*.pkl")
+        # Download the unmixed spots file (for merging and related files)
+        spots_key = f"{dataset_name}/image_spot_spectral_unmixing/"
+        spots_file = find_unmixed_spots_file(S3_BUCKET, spots_key, "unmixed_spots_*.pkl")
         
-#         if not spots_file:
-#             return JSONResponse(
-#                 status_code=404, 
-#                 content={
-#                     "error": "Spots data file not found",
-#                     "checked_path": f"s3://{S3_BUCKET}/{spots_key}unmixed_spots_*.pkl"
-#                 }
-#             )
+        if not spots_file:
+            return JSONResponse(
+                status_code=404, 
+                content={
+                    "error": "Spots data file not found",
+                    "checked_path": f"s3://{S3_BUCKET}/{spots_key}unmixed_spots_*.pkl"
+                }
+            )
         
-#         # Try to create the merged parquet file by calling our new merge function
-#         try:
-#             merged_df = load_and_merge_spots_from_s3(S3_BUCKET, dataset_name, spots_key)
-#             if merged_df is not None:
-#                 logger.info(f"Successfully created merged parquet file for dataset {dataset_name}")
-#             else:
-#                 logger.warning(f"Could not create merged parquet file for dataset {dataset_name}")
-#         except Exception as e:
-#             logger.warning(f"Error creating merged parquet file: {e}")
-#             # Continue anyway - the individual files will still be available
+        # Try to create the merged parquet file by calling our new merge function
+        try:
+            merged_df = load_and_merge_spots_from_s3(S3_BUCKET, dataset_name, spots_key)
+            if merged_df is not None:
+                logger.info(f"Successfully created merged parquet file for dataset {dataset_name}")
+            else:
+                logger.warning(f"Could not create merged parquet file for dataset {dataset_name}")
+        except Exception as e:
+            logger.warning(f"Error creating merged parquet file: {e}")
+            # Continue anyway - the individual files will still be available
         
-#         # Try to download related files (ratios and summary stats)
-#         related_files = find_related_files(S3_BUCKET, spots_key, spots_file)
+        # Try to download related files (ratios and summary stats)
+        related_files = find_related_files(S3_BUCKET, spots_key, spots_file)
         
-#         downloaded_files = [str(manifest_local_path)]
+        downloaded_files = [str(manifest_local_path)]
         
-#         # Add the parquet file to downloaded files if it was created
-#         parquet_file = Path("/s3-cache") / S3_BUCKET / dataset_name / f"{dataset_name}.parquet"
-#         if parquet_file.exists():
-#             downloaded_files.append(str(parquet_file))
+        # Add the parquet file to downloaded files if it was created
+        parquet_file = Path("/s3-cache") / S3_BUCKET / dataset_name / f"{dataset_name}.parquet"
+        if parquet_file.exists():
+            downloaded_files.append(str(parquet_file))
         
-#         if related_files['ratios']:
-#             ratios_local_path = s3_handler.download_file(
-#                 key=related_files['ratios'],
-#                 bucket_name=S3_BUCKET,
-#                 use_cache=True
-#             )
-#             if ratios_local_path:
-#                 downloaded_files.append(str(ratios_local_path))
+        if related_files['ratios']:
+            ratios_local_path = s3_handler.download_file(
+                key=related_files['ratios'],
+                bucket_name=S3_BUCKET,
+                use_cache=True
+            )
+            if ratios_local_path:
+                downloaded_files.append(str(ratios_local_path))
         
-#         if related_files['summary_stats']:
-#             stats_local_path = s3_handler.download_file(
-#                 key=related_files['summary_stats'],
-#                 bucket_name=S3_BUCKET,
-#                 use_cache=True
-#             )
-#             if stats_local_path:
-#                 downloaded_files.append(str(stats_local_path))
+        if related_files['summary_stats']:
+            stats_local_path = s3_handler.download_file(
+                key=related_files['summary_stats'],
+                bucket_name=S3_BUCKET,
+                use_cache=True
+            )
+            if stats_local_path:
+                downloaded_files.append(str(stats_local_path))
         
-#         return {
-#             "success": True,
-#             "dataset_name": dataset_name,
-#             "downloaded_files": downloaded_files
-#         }
+        return {
+            "success": True,
+            "dataset_name": dataset_name,
+            "downloaded_files": downloaded_files
+        }
     
-#     except Exception as e:
-#         logger.error(f"Error downloading dataset: {e}", exc_info=True)
-#         return JSONResponse(status_code=500, content={"error": str(e)})
+    except Exception as e:
+        logger.error(f"Error downloading dataset: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.post("/api/datasets/set-active")
 async def set_active_dataset(request: Request):

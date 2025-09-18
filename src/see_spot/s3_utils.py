@@ -155,7 +155,12 @@ def get_base_pattern_from_unmixed(unmixed_key: str) -> str:
     return 'R3'  # Default fallback
 
 
-def load_and_merge_spots_from_s3(bucket: str, dataset_name: str, unmixed_spots_prefix: str) -> Optional[pl.DataFrame]:
+def load_and_merge_spots_from_s3(
+    bucket: str, 
+    dataset_name: str, 
+    unmixed_spots_prefix: str, 
+    valid_spots_only: bool = True
+) -> Optional[pl.DataFrame]:
     """
     Load both mixed and unmixed spots files, merge them, cache as parquet, and return merged DataFrame.
     
@@ -163,6 +168,7 @@ def load_and_merge_spots_from_s3(bucket: str, dataset_name: str, unmixed_spots_p
         bucket: S3 bucket name
         dataset_name: Dataset name (used for parquet filename)
         unmixed_spots_prefix: S3 prefix where spots files are located
+        valid_spots_only: If True, filter to only valid spots. If False, return all spots.
         
     Returns:
         Merged Polars DataFrame or None if loading failed
@@ -177,9 +183,13 @@ def load_and_merge_spots_from_s3(bucket: str, dataset_name: str, unmixed_spots_p
             df = pl.read_parquet(parquet_file)
             # Optimize data types and filter for valid spots
             df_optimized = optimize_dtypes(df)
-            df_valid = df_optimized.filter(pl.col('valid_spot'))
-            logger.info(f"Loaded DataFrame from parquet. Shape: {df_valid.shape}")
-            return df_valid
+            if valid_spots_only:
+                df_final = df_optimized.filter(pl.col('valid_spot'))
+                logger.info(f"Loaded DataFrame from parquet (valid spots only). Shape: {df_final.shape}")
+            else:
+                df_final = df_optimized
+                logger.info(f"Loaded DataFrame from parquet (all spots). Shape: {df_final.shape}")
+            return df_final
         except Exception as e:
             logger.error(f"Error loading parquet file: {e}", exc_info=True)
             # Fall through to regenerate the file
@@ -279,10 +289,14 @@ def load_and_merge_spots_from_s3(bucket: str, dataset_name: str, unmixed_spots_p
             logger.error(f"Error saving parquet file: {e}", exc_info=True)
             # Continue anyway - we have the data in memory
         
-        # 8. Filter for valid spots and return
-        df_valid = df_merged.filter(pl.col('valid_spot'))
-        logger.info(f"Returning valid spots DataFrame. Shape: {df_valid.shape}")
-        return df_valid
+        # 8. Filter for valid spots (if requested) and return
+        if valid_spots_only:
+            df_final = df_merged.filter(pl.col('valid_spot'))
+            logger.info(f"Returning valid spots DataFrame. Shape: {df_final.shape}")
+        else:
+            df_final = df_merged
+            logger.info(f"Returning all spots DataFrame. Shape: {df_final.shape}")
+        return df_final
 
 
 def find_unmixed_spots_file(bucket: str, prefix: str, pattern: str) -> Optional[str]:
