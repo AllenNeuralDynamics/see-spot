@@ -9,14 +9,14 @@ import logging
 import os
 import json
 from pathlib import Path
-import pandas as pd
+import polars as pl
 import itertools
 from typing import List, Tuple, Dict, Any
 
 # Import your modules
 from see_spot.s3_handler import s3_handler
 from see_spot.s3_utils import (
-    find_unmixed_spots_file, find_related_files, 
+    find_unmixed_spots_file, find_related_files,
     load_ratios_from_s3, load_summary_stats_from_s3,
     load_processing_manifest_from_s3, load_and_merge_spots_from_s3
 )
@@ -36,21 +36,9 @@ app.mount("/static", StaticFiles(directory=static_dir), name="static")
 templates = Jinja2Templates(directory=templates_dir)
 
 # Configuration for the spots data
-# REAL_SPOTS_BUCKET = "codeocean-s3datasetsbucket-1u41qdg42ur9"
-# REAL_SPOTS_PREFIX = "4c76aae1-d7f0-4ed7-b7f6-72b460f5724d/"
-
-
 REAL_SPOTS_BUCKET = "aind-open-data"
-# Define the root prefix for a processed dataset.
-# This will be the base for finding manifest, spots, and fused data.
-# Example: "HCR_747667_2025-04-18_13-00-00_processed_2025-05-13_23-21-01"
-#PROCESSED_DATA_ROOT_PREFIX = "HCR_747667_2025-04-18_13-00-00_processed_2025-05-13_23-21-01"
-#PROCESSED_DATA_ROOT_PREFIX = "HCR_749315_2025-04-18_13-00-00_processed_2025-05-13_23-47-40"
-#PROCESSED_DATA_ROOT_PREFIX = "HCR_749315_2025-04-25_13-00-00_processed_2025-05-17_22-13-57"
 PROCESSED_DATA_ROOT_PREFIX = "HCR_749315_2025-05-08_14-00-00_processed_2025-05-17_22-15-31"
-# REAL_SPOTS_PREFIX will be derived: PROCESSED_DATA_ROOT_PREFIX + "/image_spot_spectral_unmixing/"
-# REAL_SPOTS_PATTERN is static: "unmixed_spots_*.pkl"
-SAMPLE_SIZE = 10000 # Number of points to send to frontend
+SAMPLE_SIZE = 10000
 
 # In-memory cache for DataFrame to avoid reloading on every request
 df_cache = {
@@ -61,10 +49,10 @@ df_cache = {
     "spot_channels_from_manifest": None
 }
 
-def get_channel_pairs(df: pd.DataFrame) -> List[Tuple[str, str]]:
+def get_channel_pairs(df: pl.DataFrame) -> List[Tuple[str, str]]:
     """Extracts channel pairs from intensity column names."""
     intensity_cols = [col for col in df.columns if col.endswith('_intensity')]
-    channels = sorted([col.split('_')[1] for col in intensity_cols]) # Extract e.g., '488'
+    channels = sorted([col.split('_')[1] for col in intensity_cols])
     return list(itertools.combinations(channels, 2))
 
 @app.get("/api/real_spots_data")
@@ -75,7 +63,6 @@ async def get_real_spots_data(sample_size: int = SAMPLE_SIZE, force_refresh: boo
     if not force_refresh and df_cache["data"] is not None:
         logger.info(f"Using cached DataFrame from {df_cache['last_loaded']}. Shape: {df_cache['data'].shape}")
         df = df_cache["data"]
-        # We still need to find related files if they weren't cached
         # Load manifest and channels from cache if available, or re-fetch
         processing_manifest = df_cache.get("processing_manifest")
         spot_channels_from_manifest = df_cache.get("spot_channels_from_manifest")
@@ -91,8 +78,7 @@ async def get_real_spots_data(sample_size: int = SAMPLE_SIZE, force_refresh: boo
                 logger.info(f"Loaded spot channels from manifest: {spot_channels_from_manifest}")
             else:
                 logger.error(f"Could not load processing manifest or find 'spot_channels'. Manifest: {processing_manifest}")
-                # Fallback or error handling if manifest is crucial for channel pairs
-                spot_channels_from_manifest = [] # Default to empty or handle error response
+                spot_channels_from_manifest = []
     else:
         # Need to load DataFrame from S3
         # 1. Load processing manifest to determine paths and channels
@@ -107,47 +93,46 @@ async def get_real_spots_data(sample_size: int = SAMPLE_SIZE, force_refresh: boo
         spot_channels_from_manifest = processing_manifest.get("spot_channels", [])
         if not spot_channels_from_manifest:
             logger.warning("No 'spot_channels' found in manifest. Channel pairs might be incomplete.")
-            # Potentially return an error if these are strictly required later on
         else:
             logger.info(f"Loaded spot channels from manifest: {spot_channels_from_manifest}")
-
 
         # 2. Find and load the merged data
         unmixed_spots_prefix = f"{PROCESSED_DATA_ROOT_PREFIX}/image_spot_spectral_unmixing/"
         
         logger.info(f"Loading merged spots data for dataset: {PROCESSED_DATA_ROOT_PREFIX}")
         try:
-            df = load_and_merge_spots_from_s3(
+            df_polars = load_and_merge_spots_from_s3(
                 REAL_SPOTS_BUCKET, 
                 PROCESSED_DATA_ROOT_PREFIX, 
                 unmixed_spots_prefix
             )
-            if df is None:
+            if df_polars is None:
                 logger.error("Failed to load merged DataFrame from S3/cache.")
                 return JSONResponse(status_code=500, content={'error': 'Failed to load spots data'})
-            logger.info(f"Loaded merged DataFrame shape: {df.shape}")
+            logger.info(f"Loaded merged Polars DataFrame shape: {df_polars.shape}")
+            
+            # Convert to pandas for frontend compatibility
+            df = df_polars.to_pandas()
+            logger.info(f"Converted to pandas DataFrame shape: {df.shape}")
 
             # Update cache
             df_cache["data"] = df
             df_cache["last_loaded"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            df_cache["target_key"] = f"{unmixed_spots_prefix}merged"  # Dummy key for cache tracking
-            df_cache["processing_manifest"] = processing_manifest # Cache manifest
-            df_cache["spot_channels_from_manifest"] = spot_channels_from_manifest # Cache channels
+            df_cache["target_key"] = f"{unmixed_spots_prefix}merged"
+            df_cache["processing_manifest"] = processing_manifest
+            df_cache["spot_channels_from_manifest"] = spot_channels_from_manifest
             logger.info(f"Updated DataFrame cache at {df_cache['last_loaded']}")
         except Exception as e:
             logger.error(f"Exception during DataFrame loading: {e}", exc_info=True)
             return JSONResponse(status_code=500, content={'error': 'Error loading spots data'})
 
-    # 4. Find and load related files (ratios and summary_stats)
-    # Related files are expected to be in the same directory as the spots files
+    # 3. Find and load related files (ratios and summary_stats)
     ratios_data = None
     summary_stats_data = None
 
-    # The prefix for related files should be the spots directory
-    related_files_prefix = unmixed_spots_prefix
-    # We need to find a target key for related files - use the unmixed spots file
+    related_files_prefix = f"{PROCESSED_DATA_ROOT_PREFIX}/image_spot_spectral_unmixing/"
     unmixed_target_key = find_unmixed_spots_file(
-        REAL_SPOTS_BUCKET, unmixed_spots_prefix, "unmixed_spots_*.pkl"
+        REAL_SPOTS_BUCKET, related_files_prefix, "unmixed_spots_*.pkl"
     )
     
     if unmixed_target_key:
@@ -165,14 +150,13 @@ async def get_real_spots_data(sample_size: int = SAMPLE_SIZE, force_refresh: boo
             summary_stats_df = load_summary_stats_from_s3(REAL_SPOTS_BUCKET, related_files['summary_stats'])
             if summary_stats_df is not None:
                 logger.info(f"Loaded summary stats with shape: {summary_stats_df.shape}")
-                # Convert to list of records for JSON serialization
                 summary_stats_data = summary_stats_df.to_dict(orient='records')
                 logger.info(f"Prepared {len(summary_stats_data)} summary stat records")
 
-    # 5. Subsample the data
+    # 4. Subsample the data
     if len(df) > sample_size:
         logger.info(f"Subsampling DataFrame from {len(df)} to {sample_size} rows.")
-        plot_df = df.sample(n=sample_size, random_state=None).copy() # Use None for true randomness on each call
+        plot_df = df.sample(n=sample_size, random_state=None).copy()
     else:
         plot_df = df.copy()
     logger.info(f"Plotting DataFrame shape: {plot_df.shape}")
@@ -181,18 +165,15 @@ async def get_real_spots_data(sample_size: int = SAMPLE_SIZE, force_refresh: boo
     plot_df['reassigned'] = plot_df['chan'] != plot_df['unmixed_chan']
     logger.info(f"Added 'reassigned' column. {plot_df['reassigned'].sum()} spots were reassigned.")
 
-    # 6. Determine available channels and pairs
+    # 5. Determine available channels and pairs
     try:
-        # If spot_channels_from_manifest is available, use it. Otherwise, fallback to get_channel_pairs.
         if spot_channels_from_manifest:
-            # Assuming spot_channels_from_manifest is a list like ['488', '514', '561']
             channels = sorted(spot_channels_from_manifest)
             channel_pairs = list(itertools.combinations(channels, 2))
             logger.info(f"Using channel pairs from manifest: {channel_pairs}")
         else:
-            # Fallback to deriving from DataFrame columns if manifest or channels are missing
             logger.warning("Falling back to deriving channel pairs from DataFrame columns.")
-            channel_pairs = get_channel_pairs(plot_df)
+            channel_pairs = get_channel_pairs(pl.from_pandas(plot_df))
 
         if not channel_pairs:
              logger.error("Could not determine channel pairs from manifest or DataFrame columns.")
@@ -202,11 +183,9 @@ async def get_real_spots_data(sample_size: int = SAMPLE_SIZE, force_refresh: boo
         logger.error(f"Error determining channel pairs: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={'error': 'Error processing channel data'})
 
-    # 7. Prepare data for JSON response
-    # Select columns needed for plotting and table population
+    # 6. Prepare data for JSON response
     required_cols = ['spot_id', 'chan', 'r', 'dist', 'unmixed_chan', 'reassigned']
     intensity_cols = [f'chan_{c}_intensity' for pair in channel_pairs for c in pair]
-    # Ensure unique columns
     all_needed_cols = list(dict.fromkeys(required_cols + intensity_cols))
 
     # Check if all needed columns exist
@@ -215,20 +194,16 @@ async def get_real_spots_data(sample_size: int = SAMPLE_SIZE, force_refresh: boo
         logger.error(f"Missing required columns in DataFrame: {missing_cols}")
         return JSONResponse(status_code=500, content={'error': f'Missing columns: {missing_cols}'})
 
-    # Select the subset of columns for plotting
     plot_df_subset = plot_df[all_needed_cols].copy()
 
-    # Create a separate DataFrame for spot details with neuroglancer coordinates
+    # Create spot details for neuroglancer
     detail_cols = ['spot_id', 'cell_id', 'round', 'z', 'y', 'x']
-    
-    # Check which of these columns exist in the original data
     available_detail_cols = [col for col in detail_cols if col in plot_df.columns]
     
-    if len(available_detail_cols) > 1:  # At least spot_id and one more column
+    if len(available_detail_cols) > 1:
         logger.info(f"Creating spot_details with columns: {available_detail_cols}")
         spot_details_df = plot_df[available_detail_cols].copy()
         
-        # Convert to dictionary keyed by spot_id for fast lookup
         spot_details = {
             str(row['spot_id']): {
                 col: row[col] for col in available_detail_cols if col != 'spot_id'
@@ -240,31 +215,24 @@ async def get_real_spots_data(sample_size: int = SAMPLE_SIZE, force_refresh: boo
         spot_details = {}
         logger.warning("Could not create spot_details: required columns not found in DataFrame")
 
-    # 8. Generate the fused S3 paths
-    # base_fuse_path is derived from PROCESSED_DATA_ROOT_PREFIX
+    # 7. Generate fused S3 paths
     base_fuse_path = f"s3://{REAL_SPOTS_BUCKET}/{PROCESSED_DATA_ROOT_PREFIX}/image_tile_fusing/fused"
 
-    # Use spot_channels_from_manifest if available, otherwise fallback to a default or error
     if spot_channels_from_manifest:
         chs_for_fused_paths = spot_channels_from_manifest
     else:
-        # Fallback: if manifest channels are not available, what should we do?
-        # Option 1: Use channels derived from plot_df (less reliable for *all* fused data)
-        # Option 2: Use a hardcoded default list (as it was before)
-        # Option 3: Return an error or an empty list for fused_s3_paths
-        logger.warning("Spot channels from manifest not available for generating fused paths. Using unique channels from current channel_pairs as a fallback.")
-        # Derive unique channels from the current channel_pairs (which might also be a fallback)
+        logger.warning("Spot channels from manifest not available for generating fused paths.")
         if channel_pairs:
              unique_channels_from_pairs = sorted(list(set(itertools.chain(*channel_pairs))))
              chs_for_fused_paths = unique_channels_from_pairs
         else:
-             logger.error("Cannot determine channels for fused paths. Manifest missing and no channel pairs found.")
-             chs_for_fused_paths = [] # Or handle as an error state
+             logger.error("Cannot determine channels for fused paths.")
+             chs_for_fused_paths = []
 
     fused_s3_paths = [f"{base_fuse_path}/channel_{ch}.zarr" for ch in chs_for_fused_paths]
     logger.info(f"Generated fused S3 paths: {fused_s3_paths}")
 
-    # 9. Convert DataFrame to list of records (dictionaries)
+    # 8. Convert DataFrame to list of records (dictionaries)
     try:
         data_for_frontend = plot_df_subset.to_dict(orient='records')
         logger.info(f"Prepared {len(data_for_frontend)} records for frontend.")
@@ -272,13 +240,13 @@ async def get_real_spots_data(sample_size: int = SAMPLE_SIZE, force_refresh: boo
         logger.error(f"Error converting DataFrame to dict: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={'error': 'Error formatting data'})
 
-    # 10. Prepare ratios data for JSON response
+    # 9. Prepare ratios data for JSON response
     ratios_json = None
     if ratios_data is not None:
         ratios_json = ratios_data.tolist()
-        logger.info(f"Converted ratios matrix to JSON serializable format")
+        logger.info("Converted ratios matrix to JSON serializable format")
 
-    # 11. Build the response
+    # 10. Build the response
     response = {
         "channel_pairs": channel_pairs,
         "spots_data": data_for_frontend,
@@ -286,7 +254,6 @@ async def get_real_spots_data(sample_size: int = SAMPLE_SIZE, force_refresh: boo
         "fused_s3_paths": fused_s3_paths
     }
     
-    # Add optional data if available
     if ratios_json:
         response["ratios"] = ratios_json
     
@@ -294,223 +261,6 @@ async def get_real_spots_data(sample_size: int = SAMPLE_SIZE, force_refresh: boo
         response["summary_stats"] = summary_stats_data
     
     return response
-
-# Add a new endpoint for creating neuroglancer links
-@app.post("/api/create-neuroglancer-link")
-async def create_neuroglancer_link(request: Request):
-    """Creates a neuroglancer link with a point annotation at specified coordinates."""
-    # Parse the JSON data from the request
-    data = await request.json()
-    
-    # Extract the parameters from the request
-    fused_s3_paths = data.get("fused_s3_paths")
-    position = data.get("position")
-    point_annotation = data.get("point_annotation")
-    cell_id = data.get("cell_id", 42)  # Default value if not provided
-    spot_id = data.get("spot_id")
-    annotation_color = data.get("annotation_color", "#FFFF00")
-    cross_section_scale = data.get("cross_section_scale", 1.0)
-    
-    # Input validation
-    if not fused_s3_paths or not position or not point_annotation or not spot_id:
-        return JSONResponse(
-            status_code=400,
-            content={"error": "Missing required parameters: fused_s3_paths, position, point_annotation, or spot_id"}
-        )
-    
-    try:
-        # Import the ng_utils module
-        from see_spot import ng_utils
-        
-        # Create the neuroglancer link
-        ng_link = ng_utils.create_link_no_upload(
-            fused_s3_paths,
-            annotation_color=annotation_color,
-            cross_section_scale=cross_section_scale,
-            cell_id=cell_id,
-            spot_id=spot_id,
-            position=position,
-            point_annotation=point_annotation
-        )
-        
-        return {"url": ng_link}
-    except Exception as e:
-        logger.error(f"Error creating neuroglancer link: {str(e)}")
-        return JSONResponse(
-            status_code=500,
-            content={"error": f"Failed to create neuroglancer link: {str(e)}"}
-        )
-
-@app.get("/api/datasets")
-async def list_datasets():
-    """List all available datasets in the local cache."""
-    try:
-        cache_path = Path("/s3-cache") / REAL_SPOTS_BUCKET
-        datasets = []
-        
-        if cache_path.exists():
-            for dataset_dir in cache_path.iterdir():
-                if dataset_dir.is_dir() and not dataset_dir.name.startswith('.'):
-                    # Get directory creation time
-                    stat = dataset_dir.stat()
-                    creation_time = datetime.fromtimestamp(stat.st_mtime)
-                    
-                    # Check if dataset has the required structure
-                    spots_dir = dataset_dir / "image_spot_spectral_unmixing"
-                    has_data = spots_dir.exists()
-                    
-                    datasets.append({
-                        "name": dataset_dir.name,
-                        "creation_date": creation_time.strftime("%Y-%m-%d %H:%M:%S"),
-                        "has_data": has_data,
-                        "is_current": dataset_dir.name == PROCESSED_DATA_ROOT_PREFIX
-                    })
-        
-        # Sort by creation date (newest first)
-        datasets.sort(key=lambda x: x["creation_date"], reverse=True)
-        
-        return {"datasets": datasets}
-    
-    except Exception as e:
-        logger.error(f"Error listing datasets: {e}", exc_info=True)
-        return JSONResponse(status_code=500, content={"error": str(e)})
-
-@app.post("/api/datasets/download")
-async def download_dataset(request: Request):
-    """Download a dataset from S3 to local cache."""
-    try:
-        data = await request.json()
-        dataset_name = data.get("dataset_name")
-        
-        if not dataset_name:
-            return JSONResponse(status_code=400, content={"error": "Dataset name is required"})
-        
-        # Check if dataset exists on S3 by looking for the processing manifest
-        manifest_key = f"{dataset_name}/derived/processing_manifest.json"
-        
-        logger.info(f"Checking if dataset exists: s3://{REAL_SPOTS_BUCKET}/{manifest_key}")
-        
-        # Try to get the manifest to verify the dataset exists
-        manifest_content = s3_handler.get_object(key=manifest_key, bucket_name=REAL_SPOTS_BUCKET)
-        
-        if manifest_content is None:
-            return JSONResponse(
-                status_code=404, 
-                content={
-                    "error": f"Dataset not found on S3",
-                    "checked_path": f"s3://{REAL_SPOTS_BUCKET}/{manifest_key}"
-                }
-            )
-        
-        # Download the processing manifest first
-        manifest_local_path = s3_handler.download_file(
-            key=manifest_key,
-            bucket_name=REAL_SPOTS_BUCKET,
-            use_cache=True
-        )
-        
-        if manifest_local_path is None:
-            return JSONResponse(status_code=500, content={"error": "Failed to download processing manifest"})
-        
-        # Download the unmixed spots file (for merging and related files)
-        spots_key = f"{dataset_name}/image_spot_spectral_unmixing/"
-        spots_file = find_unmixed_spots_file(REAL_SPOTS_BUCKET, spots_key, "unmixed_spots_*.pkl")
-        
-        if not spots_file:
-            return JSONResponse(
-                status_code=404, 
-                content={
-                    "error": "Spots data file not found",
-                    "checked_path": f"s3://{REAL_SPOTS_BUCKET}/{spots_key}unmixed_spots_*.pkl"
-                }
-            )
-        
-        # Try to create the merged parquet file by calling our new merge function
-        try:
-            merged_df = load_and_merge_spots_from_s3(REAL_SPOTS_BUCKET, dataset_name, spots_key)
-            if merged_df is not None:
-                logger.info(f"Successfully created merged parquet file for dataset {dataset_name}")
-            else:
-                logger.warning(f"Could not create merged parquet file for dataset {dataset_name}")
-        except Exception as e:
-            logger.warning(f"Error creating merged parquet file: {e}")
-            # Continue anyway - the individual files will still be available
-        
-        # Try to download related files (ratios and summary stats)
-        related_files = find_related_files(REAL_SPOTS_BUCKET, spots_key, spots_file)
-        
-        downloaded_files = [str(manifest_local_path)]
-        
-        # Add the parquet file to downloaded files if it was created
-        parquet_file = Path("/s3-cache") / REAL_SPOTS_BUCKET / dataset_name / f"{dataset_name}.parquet"
-        if parquet_file.exists():
-            downloaded_files.append(str(parquet_file))
-        
-        if related_files['ratios']:
-            ratios_local_path = s3_handler.download_file(
-                key=related_files['ratios'],
-                bucket_name=REAL_SPOTS_BUCKET,
-                use_cache=True
-            )
-            if ratios_local_path:
-                downloaded_files.append(str(ratios_local_path))
-        
-        if related_files['summary_stats']:
-            stats_local_path = s3_handler.download_file(
-                key=related_files['summary_stats'],
-                bucket_name=REAL_SPOTS_BUCKET,
-                use_cache=True
-            )
-            if stats_local_path:
-                downloaded_files.append(str(stats_local_path))
-        
-        return {
-            "success": True,
-            "dataset_name": dataset_name,
-            "downloaded_files": downloaded_files
-        }
-    
-    except Exception as e:
-        logger.error(f"Error downloading dataset: {e}", exc_info=True)
-        return JSONResponse(status_code=500, content={"error": str(e)})
-
-@app.post("/api/datasets/set-active")
-async def set_active_dataset(request: Request):
-    """Set the active dataset for the application."""
-    try:
-        data = await request.json()
-        dataset_name = data.get("dataset_name")
-        
-        if not dataset_name:
-            return JSONResponse(status_code=400, content={"error": "Dataset name is required"})
-        
-        # Verify the dataset exists locally
-        cache_path = Path("/s3-cache") / REAL_SPOTS_BUCKET / dataset_name
-        if not cache_path.exists():
-            return JSONResponse(status_code=404, content={"error": "Dataset not found in local cache"})
-        
-        # Update the global variable
-        global PROCESSED_DATA_ROOT_PREFIX
-        PROCESSED_DATA_ROOT_PREFIX = dataset_name
-        
-        # Clear the cache to force reload with new dataset
-        df_cache["data"] = None
-        df_cache["last_loaded"] = None
-        df_cache["target_key"] = None
-        df_cache["processing_manifest"] = None
-        df_cache["spot_channels_from_manifest"] = None
-        
-        logger.info(f"Active dataset changed to: {dataset_name}")
-        
-        return {
-            "success": True,
-            "dataset_name": dataset_name,
-            "message": "Active dataset updated successfully"
-        }
-    
-    except Exception as e:
-        logger.error(f"Error setting active dataset: {e}", exc_info=True)
-        return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.get("/")
 @app.get("/unmixed-spots")

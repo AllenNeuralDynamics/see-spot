@@ -1,11 +1,12 @@
 from typing import Optional, Dict, List, Tuple, Any
-import pandas as pd
+import polars as pl
+import pandas as pd  # Keep for compatibility where needed
 import numpy as np
 from see_spot.s3_handler import s3_handler
 from pathlib import Path
 import fnmatch
 import io
-import json # Added for JSON parsing
+import json  # Added for JSON parsing
 
 import logging
 import tempfile
@@ -14,18 +15,18 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 def merge_spots_tables(spots_mixed, spots_unmixed):
-    """Merge mixed and unmixed spots tables.
+    """Merge mixed and unmixed spots tables using Polars.
     
     Args:
-        spots_mixed (pd.DataFrame): Mixed spots DataFrame
-        spots_unmixed (pd.DataFrame): Unmixed spots DataFrame
+        spots_mixed (pl.DataFrame): Mixed spots DataFrame
+        spots_unmixed (pl.DataFrame): Unmixed spots DataFrame
         
     Returns:
-        pd.DataFrame: Merged DataFrame with unmixed_removed column and spot_id
+        pl.DataFrame: Merged DataFrame with unmixed_removed column
     """
-    # Drop spot_id column from both DataFrames
-    mixed_clean = spots_mixed.drop(columns=['spot_id'], errors='ignore').copy()
-    unmixed_clean = spots_unmixed.drop(columns=['spot_id'], errors='ignore').copy()
+    # Keep spot_id from mixed table (it's the main table)
+    mixed_clean = spots_mixed.clone()
+    unmixed_clean = spots_unmixed.drop('spot_id', strict=False)
     
     # Get columns that are unique to unmixed table
     mixed_cols = set(mixed_clean.columns)
@@ -34,19 +35,20 @@ def merge_spots_tables(spots_mixed, spots_unmixed):
     
     # Keep only merge keys and unique columns from unmixed
     merge_keys = ['chan', 'chan_spot_id']
-    unmixed_subset = unmixed_clean[merge_keys + unique_unmixed_cols].copy()
+    select_cols = merge_keys + unique_unmixed_cols
+    unmixed_subset = unmixed_clean.select(select_cols)
     
     # Perform left merge
-    merged = mixed_clean.merge(unmixed_subset, on=merge_keys, how='left')
+    merged = mixed_clean.join(unmixed_subset, on=merge_keys, how='left')
     
-    # Add unmixed_removed column - True where any unique unmixed column is NaN
+    # Add unmixed_removed column - True where any unique unmixed column is null
     if unique_unmixed_cols:
-        merged['unmixed_removed'] = merged[unique_unmixed_cols].isnull().all(axis=1)
+        # Create condition: all unique unmixed columns are null
+        null_conditions = [pl.col(col).is_null() for col in unique_unmixed_cols]
+        all_null = pl.fold(True, lambda acc, x: acc & x, null_conditions)
+        merged = merged.with_columns(unmixed_removed=all_null)
     else:
-        merged['unmixed_removed'] = False
-    
-    # Create spot_id column based on the index
-    merged['spot_id'] = merged.index
+        merged = merged.with_columns(unmixed_removed=pl.lit(False))
     
     return merged
 
@@ -94,7 +96,7 @@ def get_base_pattern_from_unmixed(unmixed_key: str) -> str:
     return 'R3'  # Default fallback
 
 
-def load_and_merge_spots_from_s3(bucket: str, dataset_name: str, unmixed_spots_prefix: str) -> Optional[pd.DataFrame]:
+def load_and_merge_spots_from_s3(bucket: str, dataset_name: str, unmixed_spots_prefix: str) -> Optional[pl.DataFrame]:
     """
     Load both mixed and unmixed spots files, merge them, cache as parquet, and return merged DataFrame.
     
@@ -104,7 +106,7 @@ def load_and_merge_spots_from_s3(bucket: str, dataset_name: str, unmixed_spots_p
         unmixed_spots_prefix: S3 prefix where spots files are located
         
     Returns:
-        Merged DataFrame or None if loading failed
+        Merged Polars DataFrame or None if loading failed
     """
     cache_dir = Path("/s3-cache") / bucket / dataset_name
     parquet_file = cache_dir / f"{dataset_name}.parquet"
@@ -113,9 +115,9 @@ def load_and_merge_spots_from_s3(bucket: str, dataset_name: str, unmixed_spots_p
     if parquet_file.exists():
         logger.info(f"Loading merged data from cached parquet: {parquet_file}")
         try:
-            df = pd.read_parquet(parquet_file)
+            df = pl.read_parquet(parquet_file)
             # Filter for valid spots and return
-            df_valid = df[df['valid_spot'] == True]
+            df_valid = df.filter(pl.col('valid_spot'))
             logger.info(f"Loaded DataFrame from parquet. Shape: {df_valid.shape}")
             return df_valid
         except Exception as e:
@@ -172,14 +174,16 @@ def load_and_merge_spots_from_s3(bucket: str, dataset_name: str, unmixed_spots_p
             logger.error("Failed to download mixed spots file")
             return None
         
-        # 4. Load both DataFrames
+        # 4. Load both DataFrames using Polars (via pandas for pickle support)
         try:
             logger.info("Loading unmixed spots DataFrame...")
-            df_unmixed = pd.read_pickle(unmixed_local)
+            df_unmixed_pd = pd.read_pickle(unmixed_local)
+            df_unmixed = pl.from_pandas(df_unmixed_pd)
             logger.info(f"Loaded unmixed DataFrame. Shape: {df_unmixed.shape}")
             
             logger.info("Loading mixed spots DataFrame...")
-            df_mixed = pd.read_pickle(mixed_local)
+            df_mixed_pd = pd.read_pickle(mixed_local)
+            df_mixed = pl.from_pandas(df_mixed_pd)
             logger.info(f"Loaded mixed DataFrame. Shape: {df_mixed.shape}")
         except Exception as e:
             logger.error(f"Error loading pickle files: {e}", exc_info=True)
@@ -194,20 +198,29 @@ def load_and_merge_spots_from_s3(bucket: str, dataset_name: str, unmixed_spots_p
             logger.error(f"Error merging DataFrames: {e}", exc_info=True)
             return None
         
-        # 6. Save merged result as parquet to cache
+        # 6. Add spot_id column based on index
+        try:
+            logger.info("Adding spot_id column...")
+            df_merged = df_merged.with_row_index("spot_id")
+            logger.info(f"Added spot_id column. Final shape: {df_merged.shape}")
+        except Exception as e:
+            logger.error(f"Error adding spot_id column: {e}", exc_info=True)
+            return None
+        
+        # 7. Save merged result as parquet to cache
         try:
             # Ensure cache directory exists
             cache_dir.mkdir(parents=True, exist_ok=True)
             
             logger.info(f"Saving merged DataFrame to parquet: {parquet_file}")
-            df_merged.to_parquet(parquet_file, compression='snappy')
+            df_merged.write_parquet(parquet_file, compression='snappy')
             logger.info(f"Successfully saved merged data to {parquet_file}")
         except Exception as e:
             logger.error(f"Error saving parquet file: {e}", exc_info=True)
             # Continue anyway - we have the data in memory
         
-        # 7. Filter for valid spots and return
-        df_valid = df_merged[df_merged['valid_spot'] == True]
+        # 8. Filter for valid spots and return
+        df_valid = df_merged.filter(pl.col('valid_spot'))
         logger.info(f"Returning valid spots DataFrame. Shape: {df_valid.shape}")
         return df_valid
 
