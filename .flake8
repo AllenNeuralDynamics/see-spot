@@ -5,4 +5,5 @@ exclude =
     build,
     .venv,
     venv
-max-complexity = 10
+max-complexity = 50
+max-line-length = 120

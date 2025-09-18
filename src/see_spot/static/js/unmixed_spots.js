@@ -18,6 +18,9 @@ document.addEventListener('DOMContentLoaded', function () {
     const refreshButton = document.getElementById('refresh_button');
     const highlightReassignedToggle = document.getElementById('highlight_reassigned_toggle');
     const highlightStatus = document.getElementById('highlight_status');
+    const highlightRemovedToggle = document.getElementById('highlight_removed_toggle');
+    const highlightRemovedStatus = document.getElementById('highlight_removed_status');
+    const displayChanSelect = document.getElementById('display_chan_select');
     const summaryBarChartDom = document.getElementById('summary-bar-chart');
     const summaryHeatmapDom = document.getElementById('summary-heatmap');
     const futureChartDom = document.getElementById('future-chart');
@@ -35,6 +38,8 @@ document.addEventListener('DOMContentLoaded', function () {
     let currentPairIndex = 0;
     let currentSampleSize = parseInt(sampleSizeInput.value) || 10000;
     let highlightReassigned = false;
+    let highlightRemoved = false;
+    let displayChanMode = 'unmixed'; // 'unmixed' or 'mixed'
     let isNeuroglancerMode = false;
     let spotDetails = {}; // Will store the spot details for neuroglancer lookup
     let fusedS3Paths = {}; // Will store the fused S3 paths from the API
@@ -318,12 +323,14 @@ document.addEventListener('DOMContentLoaded', function () {
     prevChannelButton.addEventListener('click', function() {
         if (channelPairs.length === 0) return;
         currentPairIndex = (currentPairIndex - 1 + channelPairs.length) % channelPairs.length;
+        updateChannelSelector();
         updateChart();
     });
 
     nextChannelButton.addEventListener('click', function() {
         if (channelPairs.length === 0) return;
         currentPairIndex = (currentPairIndex + 1) % channelPairs.length;
+        updateChannelSelector();
         updateChart();
     });
     
@@ -474,9 +481,56 @@ document.addEventListener('DOMContentLoaded', function () {
         // Always convert to typed arrays for better performance
         convertToTypedArrays(spotsData);
 
+        // Create channel selector buttons
+        createChannelSelector();
+
         // Set initial channel pair
         currentPairIndex = 0;
         updateChart(spotsData);
+    }
+
+    function createChannelSelector() {
+        const channelSelector = document.getElementById('channel-selector');
+        channelSelector.innerHTML = ''; // Clear existing buttons
+        
+        channelPairs.forEach((pair, index) => {
+            const button = document.createElement('button');
+            button.textContent = `${pair[0]} vs ${pair[1]}`;
+            button.dataset.index = index;
+            
+            if (index === currentPairIndex) {
+                button.classList.add('active');
+            }
+            
+            button.addEventListener('click', function() {
+                // Remove active class from all buttons
+                channelSelector.querySelectorAll('button').forEach(btn => {
+                    btn.classList.remove('active');
+                });
+                
+                // Add active class to clicked button
+                this.classList.add('active');
+                
+                // Update current pair index and chart
+                currentPairIndex = parseInt(this.dataset.index);
+                updateChart();
+            });
+            
+            channelSelector.appendChild(button);
+        });
+    }
+
+    function updateChannelSelector() {
+        const channelSelector = document.getElementById('channel-selector');
+        const buttons = channelSelector.querySelectorAll('button');
+        
+        buttons.forEach((button, index) => {
+            if (index === currentPairIndex) {
+                button.classList.add('active');
+            } else {
+                button.classList.remove('active');
+            }
+        });
     }
 
     // Convert data to typed arrays for better performance
@@ -508,6 +562,7 @@ document.addEventListener('DOMContentLoaded', function () {
         const channels = new Array(spotsData.length);
         const unmixedChans = new Array(spotsData.length);
         const reassigned = new Array(spotsData.length);
+        const removed = new Array(spotsData.length);
         
         // Fill typed arrays
         for (let i = 0; i < spotsData.length; i++) {
@@ -527,6 +582,7 @@ document.addEventListener('DOMContentLoaded', function () {
             channels[i] = dataPoint.chan;
             unmixedChans[i] = dataPoint.unmixed_chan || 'none';
             reassigned[i] = dataPoint.reassigned || false;
+            removed[i] = dataPoint.unmixed_removed || false;
         }
         
         // Attach typed arrays to spotsData object for later use
@@ -535,6 +591,7 @@ document.addEventListener('DOMContentLoaded', function () {
         spotsData.channels = channels;
         spotsData.unmixedChans = unmixedChans;
         spotsData.reassigned = reassigned;
+        spotsData.removed = removed;
     }
 
     function updateChart(newData = null) {
@@ -570,7 +627,7 @@ document.addEventListener('DOMContentLoaded', function () {
         const xField = `chan_${xChan}_intensity`;
         const yField = `chan_${yChan}_intensity`;
         
-        // Create series data grouped by unmixed channel
+        // Create series data grouped by display channel (mixed or unmixed)
         const seriesData = {};
         const uniqueChannels = [];
         
@@ -583,22 +640,24 @@ document.addEventListener('DOMContentLoaded', function () {
         const channels = allChartData.channels;
         const unmixedChans = allChartData.unmixedChans;
         const reassigned = allChartData.reassigned;
+        const removed = allChartData.removed;
         
         for (let i = 0; i < allChartData.length; i++) {
-            const unmixedChan = unmixedChans[i];
+            // Use either unmixed channel or original channel based on display mode
+            const displayChan = displayChanMode === 'mixed' ? channels[i] : unmixedChans[i];
             
             // Add to unique channels if not already there
-            if (!uniqueChannels.includes(unmixedChan)) {
-                uniqueChannels.push(unmixedChan);
+            if (!uniqueChannels.includes(displayChan)) {
+                uniqueChannels.push(displayChan);
             }
             
             // Initialize series if not exists
-            if (!seriesData[unmixedChan]) {
-                seriesData[unmixedChan] = [];
+            if (!seriesData[displayChan]) {
+                seriesData[displayChan] = [];
             }
             
             // Add data point using typed array values for faster access
-            seriesData[unmixedChan].push({
+            seriesData[displayChan].push({
                 name: `Spot ${spotIds[i]}`,
                 value: [
                     xValues[i],            // x-coordinate (first channel intensity)
@@ -606,18 +665,19 @@ document.addEventListener('DOMContentLoaded', function () {
                     rValues[i],            // size (r value)
                     channels[i],           // category (chan)
                     spotIds[i],            // ID
-                    unmixedChan,           // unmixed channel
+                    unmixedChans[i],       // unmixed channel
                     distValues[i],         // distance
                     xChan,                 // x-axis channel
                     yChan,                 // y-axis channel
-                    reassigned[i]          // reassigned flag
+                    reassigned[i],         // reassigned flag
+                    removed[i]             // removed flag
                 ]
             });
         }
         
-        // Build series array for each unmixed channel
+        // Build series array for each channel
         const series = uniqueChannels.sort().map(channel => ({
-            name: `Unmixed: ${channel}`,
+            name: `${displayChanMode === 'mixed' ? 'Mixed' : 'Unmixed'}: ${channel}`,
             type: 'scatter',
             data: seriesData[channel],
             symbolSize: 5,
@@ -626,20 +686,46 @@ document.addEventListener('DOMContentLoaded', function () {
             largeThreshold: LARGE_DATA_THRESHOLD,
             itemStyle: {
                 color: function(params) {
+                    const isReassigned = params.data.value[9];
+                    const isRemoved = params.data.value[10];
+                    
                     // If highlighting reassigned is active, show non-reassigned in gray
-                    if (highlightReassigned) {
-                        const isReassigned = params.data.value[9];
-                        if (!isReassigned) {
-                            return '#cccccc'; // Gray for non-reassigned when highlighting
-                        }
+                    if (highlightReassigned && !isReassigned) {
+                        return '#cccccc'; // Gray for non-reassigned when highlighting
                     }
+                    
+                    // If highlighting removed is active, show non-removed in gray
+                    if (highlightRemoved && !isRemoved) {
+                        return '#cccccc'; // Gray for non-removed when highlighting
+                    }
+                    
                     return COLORS[channel] || COLORS.default;
                 },
-                // Add visual styling for reassigned spots
+                // Add visual styling for reassigned and removed spots
                 borderWidth: function(params) {
-                    return params.data.value[9] ? 2 : 0; // Add border if reassigned
+                    const isReassigned = params.data.value[9];
+                    const isRemoved = params.data.value[10];
+                    
+                    // Add border if reassigned or removed
+                    if (isReassigned || isRemoved) {
+                        return 2;
+                    }
+                    return 0;
                 },
-                borderColor: '#ffffff',
+                borderColor: function(params) {
+                    const isReassigned = params.data.value[9];
+                    const isRemoved = params.data.value[10];
+                    
+                    // Different border colors for different states
+                    if (isReassigned && isRemoved) {
+                        return '#ff00ff'; // Magenta for both reassigned and removed
+                    } else if (isReassigned) {
+                        return '#ffffff'; // White for reassigned
+                    } else if (isRemoved) {
+                        return '#000000'; // Black for removed
+                    }
+                    return '#ffffff';
+                },
                 borderType: 'solid',
                 opacity: function(params) {
                     // If highlighting reassigned, make non-reassigned more transparent
@@ -704,7 +790,7 @@ document.addEventListener('DOMContentLoaded', function () {
                     fontSize: 14
                 },
                 selected: uniqueChannels.reduce((acc, chan) => {
-                    acc[`Unmixed: ${chan}`] = true;
+                    acc[`${displayChanMode === 'mixed' ? 'Mixed' : 'Unmixed'}: ${chan}`] = true;
                     return acc;
                 }, {})
             },
@@ -717,15 +803,18 @@ document.addEventListener('DOMContentLoaded', function () {
                 formatter: function (params) {
                     const item = params.data.value;
                     const reassignedText = item[9] ? '<span style="color:red;font-weight:bold">⚠ Reassigned</span>' : '';
+                    const removedText = item[10] ? '<span style="color:orange;font-weight:bold">🗑 Removed</span>' : '';
+                    const statusText = [reassignedText, removedText].filter(t => t).join('<br/>');
+                    
                     return `<div style="font-size: 14px;">
                            ID: ${item[4]}<br/>
                            ${xChan} Intensity: ${item[0].toFixed(2)}<br/>
                            ${yChan} Intensity: ${item[1].toFixed(2)}<br/>
                            R: ${item[2].toFixed(2)}<br/>
-                           Original Chan: ${item[3]}<br/>
-                           Unmixed: ${item[5]}<br/>
+                           Mixed Chan: ${item[3]}<br/>
+                           Unmixed Chan: ${item[5]}<br/>
                            Dist: ${item[6].toFixed(2)}<br/>
-                           ${reassignedText}
+                           ${statusText ? statusText + '<br/>' : ''}
                            </div>`;
                 },
                 textStyle: {
@@ -856,6 +945,9 @@ document.addEventListener('DOMContentLoaded', function () {
 
         // Initialize chart with all options
         myChart.setOption(option, true);
+        
+        // Ensure chart fills its container properly
+        setTimeout(() => myChart.resize(), 0);
         
         // Store current processed data for lasso selection
         const allProcessedData = [].concat(...Object.values(seriesData));
@@ -1184,6 +1276,36 @@ document.addEventListener('DOMContentLoaded', function () {
         
         if (highlightReassigned) {
             toggleLabel.style.backgroundColor = '#f44336'; // Red when active
+            toggleSpan.style.left = '22px';
+        } else {
+            toggleLabel.style.backgroundColor = '#ccc'; // Gray when inactive
+            toggleSpan.style.left = '2px';
+        }
+        
+        // Update chart with new highlighting settings
+        updateChart();
+    });
+
+    // Event listener for display channel mode dropdown
+    displayChanSelect.addEventListener('change', function() {
+        displayChanMode = this.value;
+        console.log(`Display channel mode changed to: ${displayChanMode}`);
+        
+        // Update chart with new channel display mode
+        updateChart();
+    });
+
+    // Event listener for highlight removed toggle
+    highlightRemovedToggle.addEventListener('change', function() {
+        highlightRemoved = this.checked;
+        highlightRemovedStatus.textContent = highlightRemoved ? 'On' : 'Off';
+        
+        // Update toggle style
+        const toggleLabel = this.nextElementSibling;
+        const toggleSpan = toggleLabel.querySelector('span');
+        
+        if (highlightRemoved) {
+            toggleLabel.style.backgroundColor = '#9c27b0'; // Purple when active
             toggleSpan.style.left = '22px';
         } else {
             toggleLabel.style.backgroundColor = '#ccc'; // Gray when inactive
