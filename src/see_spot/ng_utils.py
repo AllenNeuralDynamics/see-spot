@@ -16,7 +16,7 @@ import boto3
 
 import json
 import urllib.parse
-def create_direct_neuroglancer_url(json_data, base_url="https://aind-neuroglancer-sauujisjxq-uw.a.run.app/"):
+def create_direct_neuroglancer_url(json_data, base_url="https://neuroglancer-demo.appspot.com"):
     """
     Creates a direct Neuroglancer URL by removing the ng_link field 
     and encoding the remaining JSON as part of the URL.
@@ -222,7 +222,7 @@ def create_link_no_upload(fused_s3_path, resolution_zyx=None,
         bucket_name,
         output_folder,
         dataset_name = pathlib.Path(output_folder).stem,
-        base_url="https://aind-neuroglancer-sauujisjxq-uw.a.run.app/",
+        base_url="https://neuroglancer-demo.appspot.com", 
         json_name=json_name,
     )
 

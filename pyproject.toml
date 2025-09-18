@@ -17,6 +17,17 @@ readme = "README.md"
 dynamic = ["version"]
 
 dependencies = [
+    "aind-ng-link",
+    "boto3>=1.40.29",
+    "fastapi>=0.116.1",
+    "jinja2>=3.1.6",
+    "numpy==1.26.4",
+    "pandas>=2.3.2",
+    "pathlib>=1.0.1",
+    "python-multipart>=0.0.20",
+    "s3fs>=0.4.2",
+    "uvicorn>=0.35.0",
+    "zarr>=3.1.2",
 ]
 
 [project.optional-dependencies]
@@ -77,3 +88,6 @@ profile = "black"
 [tool.interrogate]
 exclude = ["setup.py", "docs", "build"]
 fail-under = 100
+
+[tool.uv.sources]
+aind-ng-link = { git = "https://github.com/AllenNeuralDynamics/aind-ng-link.git" }
