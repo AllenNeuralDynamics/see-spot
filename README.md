@@ -19,6 +19,17 @@
 cd /home/matt.davis/code/see-spot && source .venv/bin/activate && cd src && uvicorn see_spot.app:app --host 0.0.0.0 --port 9999 --reload
 ```
 
+## Changelog
++ 09-19-2025
+  + backend downloads mixed + unmixed tables, merges and saves as .parquet (massive compression)
+  + polars for dataframe manipulation (huge speedup)
+  + optimized data types in tables, reduced memory demands
+  + added removed_spots key in data table and plotting in frontend
+  + Added mixed/unmixed channel display mode toggle with dedicated UI controls
+  + Implemented chart axis limit controls (auto, fixed, min/max, percentile modes)
+  + Added Sankey flow diagram showing channel reassignment patterns with backend data calculation
+  + Enhanced data filtering with valid spots toggle and removed spots highlighting
+
 ## Contributing
 
 ### Linters and testing
