@@ -66,6 +66,7 @@ document.addEventListener('DOMContentLoaded', function () {
         '638': '#9C27B0',    // Purple
         'ambiguous': '#9E9E9E', // Grey
         'none': '#607D8B',    // Blue Grey
+        'Removed': '#FF5722', // Deep Orange (distinct color for removed spots)
         'default': '#2196F3'  // Blue (default)
     };
 
@@ -647,7 +648,12 @@ document.addEventListener('DOMContentLoaded', function () {
         
         for (let i = 0; i < allChartData.length; i++) {
             // Use either unmixed channel or original channel based on display mode
-            const displayChan = displayChanMode === 'mixed' ? channels[i] : unmixedChans[i];
+            let displayChan = displayChanMode === 'mixed' ? channels[i] : unmixedChans[i];
+            
+            // Special handling: if unmixed channel is 'none', display as 'Removed'
+            if (displayChanMode === 'unmixed' && (unmixedChans[i] === 'none' || unmixedChans[i] === null || unmixedChans[i] === undefined)) {
+                displayChan = 'Removed';
+            }
             
             // Add to unique channels if not already there
             if (!uniqueChannels.includes(displayChan)) {
@@ -678,12 +684,19 @@ document.addEventListener('DOMContentLoaded', function () {
             });
         }
         
-        // Build series array for each channel
-        const series = uniqueChannels.sort().map(channel => ({
+        // Build series array for each channel with custom sorting
+        // Put "Removed" series at the end for better visual hierarchy
+        const sortedChannels = uniqueChannels.sort((a, b) => {
+            if (a === 'Removed') return 1;
+            if (b === 'Removed') return -1;
+            return a.localeCompare(b);
+        });
+        
+        const series = sortedChannels.map(channel => ({
             name: `${displayChanMode === 'mixed' ? 'Mixed' : 'Unmixed'}: ${channel}`,
             type: 'scatter',
             data: seriesData[channel],
-            symbolSize: 5,
+            symbolSize: channel === 'Removed' ? 4 : 5, // Slightly smaller symbols for removed spots
             // Add large dataset mode optimizations
             large: true,
             largeThreshold: LARGE_DATA_THRESHOLD,
@@ -755,10 +768,13 @@ document.addEventListener('DOMContentLoaded', function () {
             // Space required for all sliders
             width: 60,   // Width of each slider
             gap: 20,     // Gap between sliders
-            startRight: 40,  // Distance from right edge of chart
-            
+            startRight: 20,  // Distance from right edge of chart
+
+            // Move sliders lower in the plot area
+            top: '40%', // Move sliders down (default is 'center')
+
             // Common slider properties
-            itemWidth: 30,
+            itemWidth: 20,
             itemHeight: 200,
             textGap: 20,
             handleSize: 10,
@@ -782,7 +798,7 @@ document.addEventListener('DOMContentLoaded', function () {
                     fontWeight: 'bold'
                 }
             },
-            color: uniqueChannels.map(chan => COLORS[chan] || COLORS.default), // Fixed colors for legend
+            color: sortedChannels.map(chan => COLORS[chan] || COLORS.default), // Fixed colors for legend
             legend: {
                 type: 'scroll',
                 orient: 'vertical',
@@ -792,13 +808,13 @@ document.addEventListener('DOMContentLoaded', function () {
                 textStyle: {
                     fontSize: 14
                 },
-                selected: uniqueChannels.reduce((acc, chan) => {
+                selected: sortedChannels.reduce((acc, chan) => {
                     acc[`${displayChanMode === 'mixed' ? 'Mixed' : 'Unmixed'}: ${chan}`] = true;
                     return acc;
                 }, {})
             },
             grid: {
-                right: totalSliderWidth + sliderConfig.startRight + 120, // Make room for sliders and legend
+                right: totalSliderWidth + sliderConfig.startRight + 100, // Make room for sliders and legend
                 bottom: 70 // Still need some bottom space for axis labels
             },
             tooltip: {
