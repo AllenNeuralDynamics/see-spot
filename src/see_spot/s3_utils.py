@@ -66,33 +66,31 @@ def optimize_dtypes(df: pl.DataFrame) -> pl.DataFrame:
     else:
         return df
 
+
 def merge_spots_tables(spots_mixed, spots_unmixed):
     """Merge mixed and unmixed spots tables using Polars.
-    
+
     Args:
         spots_mixed (pl.DataFrame): Mixed spots DataFrame
         spots_unmixed (pl.DataFrame): Unmixed spots DataFrame
-        
+
     Returns:
         pl.DataFrame: Merged DataFrame with unmixed_removed column
     """
-    # Keep spot_id from mixed table (it's the main table)
-    mixed_clean = spots_mixed.clone()
+    mixed_clean = spots_mixed.drop('spot_id', strict=False)
     unmixed_clean = spots_unmixed.drop('spot_id', strict=False)
-    
+
     # Get columns that are unique to unmixed table
     mixed_cols = set(mixed_clean.columns)
     unmixed_cols = set(unmixed_clean.columns)
     unique_unmixed_cols = list(unmixed_cols - mixed_cols)
-    
+
     # Keep only merge keys and unique columns from unmixed
     merge_keys = ['chan', 'chan_spot_id']
     select_cols = merge_keys + unique_unmixed_cols
     unmixed_subset = unmixed_clean.select(select_cols)
-    
-    # Perform left merge
     merged = mixed_clean.join(unmixed_subset, on=merge_keys, how='left')
-    
+
     # Add unmixed_removed column - True where any unique unmixed column is null
     if unique_unmixed_cols:
         # Create condition: all unique unmixed columns are null
@@ -101,13 +99,10 @@ def merge_spots_tables(spots_mixed, spots_unmixed):
         merged = merged.with_columns(unmixed_removed=all_null)
     else:
         merged = merged.with_columns(unmixed_removed=pl.lit(False))
-    
-    # Add spot_id as the row index for easier identification
+
     merged_with_id = merged.with_row_index(name='spot_id', offset=1)
-    
-    # Optimize data types for memory efficiency
     merged_optimized = optimize_dtypes(merged_with_id)
-    
+
     logger.info(f"Merge completed. Final shape: {merged_optimized.shape}")
     return merged_optimized
 
@@ -267,16 +262,7 @@ def load_and_merge_spots_from_s3(
         except Exception as e:
             logger.error(f"Error merging DataFrames: {e}", exc_info=True)
             return None
-        
-        # 6. Add spot_id column based on index
-        try:
-            logger.info("Adding spot_id column...")
-            df_merged = df_merged.with_row_index("spot_id")
-            logger.info(f"Added spot_id column. Final shape: {df_merged.shape}")
-        except Exception as e:
-            logger.error(f"Error adding spot_id column: {e}", exc_info=True)
-            return None
-        
+
         # 7. Save merged result as parquet to cache
         try:
             # Ensure cache directory exists
