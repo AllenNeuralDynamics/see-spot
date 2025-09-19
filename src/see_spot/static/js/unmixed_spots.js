@@ -23,6 +23,14 @@ document.addEventListener('DOMContentLoaded', function () {
     const displayChanSelect = document.getElementById('display_chan_select');
     const validSpotToggle = document.getElementById('valid_spot_toggle');
     const validSpotStatus = document.getElementById('valid_spot_status');
+    const xlimMin = document.getElementById('xlim_min');
+    const xlimMax = document.getElementById('xlim_max');
+    const ylimMin = document.getElementById('ylim_min');
+    const ylimMax = document.getElementById('ylim_max');
+    const limitsAutoButton = document.getElementById('limits_auto');
+    const limitsFixedButton = document.getElementById('limits_fixed');
+    const limitsMinMaxButton = document.getElementById('limits_minmax');
+    const limitsPercentileButton = document.getElementById('limits_percentile');
     const summaryBarChartDom = document.getElementById('summary-bar-chart');
     const summaryHeatmapDom = document.getElementById('summary-heatmap');
     const futureChartDom = document.getElementById('future-chart');
@@ -48,6 +56,11 @@ document.addEventListener('DOMContentLoaded', function () {
     let summaryStats = null; // Will store the summary stats from the API
     let ratiosMatrix = null; // Will store the ratios matrix from the API
     let selectedSpots = new Set();
+    
+    // Chart limits variables
+    let chartLimitsMode = 'auto'; // 'auto', 'fixed', 'minmax', 'percentile'
+    let currentXLimits = [0, 2000];
+    let currentYLimits = [0, 2000];
     
     // Neuroglancer click debounce variables
     let lastNeuroglancerClickTime = 0;
@@ -410,6 +423,9 @@ document.addEventListener('DOMContentLoaded', function () {
     
     // Initial data fetch
     fetchData(currentSampleSize, false);
+    
+    // Initialize button states
+    updateButtonStates();
     
     // Fetch data function
     function fetchData(sampleSize, forceRefresh = false) {
@@ -897,7 +913,10 @@ document.addEventListener('DOMContentLoaded', function () {
                     fontWeight: 'bold'
                 },
                 axisLabel: {
-                    fontSize: 16
+                    fontSize: 16,
+                    formatter: function(value) {
+                        return Math.round(value);
+                    }
                 }
             },
             yAxis: { 
@@ -910,7 +929,10 @@ document.addEventListener('DOMContentLoaded', function () {
                     fontWeight: 'bold'
                 },
                 axisLabel: {
-                    fontSize: 16
+                    fontSize: 16,
+                    formatter: function(value) {
+                        return Math.round(value);
+                    }
                 }
             },
             dataZoom: [
@@ -979,6 +1001,14 @@ document.addEventListener('DOMContentLoaded', function () {
             ],
             series: series
         };
+
+        // Apply chart limits based on current mode
+        if (chartLimitsMode !== 'auto') {
+            option.xAxis.min = currentXLimits[0];
+            option.xAxis.max = currentXLimits[1];
+            option.yAxis.min = currentYLimits[0];
+            option.yAxis.max = currentYLimits[1];
+        }
 
         // Initialize chart with all options
         myChart.setOption(option, true);
@@ -1372,6 +1402,133 @@ document.addEventListener('DOMContentLoaded', function () {
         // Reload data with new filter setting
         fetchData(currentSampleSize, false);
     });
+
+    // Chart limits event listeners
+    function updateButtonStates() {
+        // Reset all button styles
+        limitsAutoButton.style.backgroundColor = 'white';
+        limitsFixedButton.style.backgroundColor = 'white';
+        limitsMinMaxButton.style.backgroundColor = 'white';
+        limitsPercentileButton.style.backgroundColor = 'white';
+        
+        // Highlight active button
+        if (chartLimitsMode === 'auto') {
+            limitsAutoButton.style.backgroundColor = '#e3f2fd';
+        } else if (chartLimitsMode === 'fixed') {
+            limitsFixedButton.style.backgroundColor = '#e3f2fd';
+        } else if (chartLimitsMode === 'minmax') {
+            limitsMinMaxButton.style.backgroundColor = '#e3f2fd';
+        } else if (chartLimitsMode === 'percentile') {
+            limitsPercentileButton.style.backgroundColor = '#e3f2fd';
+        }
+    }
+
+    // Input change listeners
+    [xlimMin, xlimMax, ylimMin, ylimMax].forEach(input => {
+        input.addEventListener('change', function() {
+            if (chartLimitsMode === 'fixed') {
+                currentXLimits = [parseFloat(xlimMin.value), parseFloat(xlimMax.value)];
+                currentYLimits = [parseFloat(ylimMin.value), parseFloat(ylimMax.value)];
+                updateChart();
+            }
+        });
+    });
+
+    // Auto button
+    limitsAutoButton.addEventListener('click', function() {
+        chartLimitsMode = 'auto';
+        updateButtonStates();
+        updateChart();
+    });
+
+    // Fixed limits button
+    limitsFixedButton.addEventListener('click', function() {
+        chartLimitsMode = 'fixed';
+        currentXLimits = [parseFloat(xlimMin.value), parseFloat(xlimMax.value)];
+        currentYLimits = [parseFloat(ylimMin.value), parseFloat(ylimMax.value)];
+        updateButtonStates();
+        updateChart();
+    });
+
+    // Min/Max button
+    limitsMinMaxButton.addEventListener('click', function() {
+        if (chartLimitsMode === 'minmax') {
+            // Toggle off to auto
+            chartLimitsMode = 'auto';
+        } else {
+            // Toggle on
+            chartLimitsMode = 'minmax';
+            calculateMinMaxLimits();
+        }
+        updateButtonStates();
+        updateChart();
+    });
+
+    // 1-95% button  
+    limitsPercentileButton.addEventListener('click', function() {
+        if (chartLimitsMode === 'percentile') {
+            // Toggle off to auto
+            chartLimitsMode = 'auto';
+        } else {
+            // Toggle on
+            chartLimitsMode = 'percentile';
+            calculatePercentileLimits();
+        }
+        updateButtonStates();
+        updateChart();
+    });
+
+    function calculateMinMaxLimits() {
+        if (!allChartData || allChartData.length === 0 || channelPairs.length === 0) return;
+        
+        const xChan = channelPairs[currentPairIndex][0];
+        const yChan = channelPairs[currentPairIndex][1];
+        const xField = `chan_${xChan}_intensity`;
+        const yField = `chan_${yChan}_intensity`;
+        
+        const xValues = allChartData.typedArrays[xField];
+        const yValues = allChartData.typedArrays[yField];
+        
+        const xMin = Math.min(...xValues);
+        const xMax = Math.max(...xValues);
+        const yMin = Math.min(...yValues);  
+        const yMax = Math.max(...yValues);
+        
+        currentXLimits = [xMin, xMax];
+        currentYLimits = [yMin, yMax];
+        
+        // Update input fields
+        xlimMin.value = Math.round(xMin);
+        xlimMax.value = Math.round(xMax);
+        ylimMin.value = Math.round(yMin);
+        ylimMax.value = Math.round(yMax);
+    }
+
+    function calculatePercentileLimits() {
+        if (!allChartData || allChartData.length === 0 || channelPairs.length === 0) return;
+        
+        const xChan = channelPairs[currentPairIndex][0];
+        const yChan = channelPairs[currentPairIndex][1];
+        const xField = `chan_${xChan}_intensity`;
+        const yField = `chan_${yChan}_intensity`;
+        
+        const xValues = Array.from(allChartData.typedArrays[xField]).sort((a, b) => a - b);
+        const yValues = Array.from(allChartData.typedArrays[yField]).sort((a, b) => a - b);
+        
+        const xMin = xValues[Math.floor(xValues.length * 0.01)];
+        const xMax = xValues[Math.floor(xValues.length * 0.95)];
+        const yMin = yValues[Math.floor(yValues.length * 0.01)];
+        const yMax = yValues[Math.floor(yValues.length * 0.95)];
+        
+        currentXLimits = [xMin, xMax];
+        currentYLimits = [yMin, yMax];
+        
+        // Update input fields
+        xlimMin.value = Math.round(xMin);
+        xlimMax.value = Math.round(xMax);
+        ylimMin.value = Math.round(yMin);
+        ylimMax.value = Math.round(yMax);
+    }
 
     // Function to update the summary charts (bar chart and heatmap)
     function updateSummaryCharts() {
