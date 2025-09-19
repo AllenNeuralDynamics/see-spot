@@ -793,7 +793,7 @@ document.addEventListener('DOMContentLoaded', function () {
             startRight: 20,  // Distance from right edge of chart
 
             // Move sliders lower in the plot area
-            top: '40%', // Move sliders down (default is 'center')
+            top: '45%', // Move sliders down (default is 'center')
 
             // Common slider properties
             itemWidth: 20,
