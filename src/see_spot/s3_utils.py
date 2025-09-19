@@ -14,33 +14,83 @@ import os
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+def optimize_dtypes(df: pl.DataFrame) -> pl.DataFrame:
+    """Optimize DataFrame dtypes to reduce memory usage.
+    
+    Args:
+        df: Input Polars DataFrame
+        
+    Returns:
+        DataFrame with optimized dtypes
+    """
+    logger.info("Optimizing data types for memory efficiency...")
+    
+    # Define columns that should remain as specific types
+    string_cols = ['chan', 'unmixed_chan', 'cell_id'] 
+    int_cols = ['spot_id', 'chan_spot_id', 'round']
+    bool_cols = ['valid_spot', 'reassigned', 'unmixed_removed']
+    
+    # Get current columns
+    current_cols = df.columns
+    
+    # Build casting dictionary
+    cast_dict = {}
+    
+    for col in current_cols:
+        if col in string_cols:
+            cast_dict[col] = pl.Utf8
+        elif col in int_cols:
+            # Use smaller int types where possible
+            if col in ['round']:
+                cast_dict[col] = pl.Int8  # rounds typically 1-10
+            else:
+                cast_dict[col] = pl.Int32  # spot_ids can be large but usually fit in Int32
+        elif col in bool_cols:
+            cast_dict[col] = pl.Boolean
+        elif df[col].dtype in [pl.Float64, pl.Float32]:
+            # Convert float64 to float32 for most numeric columns
+            # Check if values are small enough for float32
+            max_val = df[col].max()
+            min_val = df[col].min()
+            if max_val is not None and min_val is not None:
+                if abs(max_val) < 3.4e38 and abs(min_val) < 3.4e38:  # Float32 range
+                    cast_dict[col] = pl.Float32
+                else:
+                    cast_dict[col] = pl.Float64  # Keep as Float64 if values are too large
+    
+    # Apply casting
+    if cast_dict:
+        df_optimized = df.cast(cast_dict)
+        logger.info(f"Optimized {len(cast_dict)} columns to smaller dtypes")
+        return df_optimized
+    else:
+        return df
+
+
 def merge_spots_tables(spots_mixed, spots_unmixed):
     """Merge mixed and unmixed spots tables using Polars.
-    
+
     Args:
         spots_mixed (pl.DataFrame): Mixed spots DataFrame
         spots_unmixed (pl.DataFrame): Unmixed spots DataFrame
-        
+
     Returns:
         pl.DataFrame: Merged DataFrame with unmixed_removed column
     """
-    # Keep spot_id from mixed table (it's the main table)
-    mixed_clean = spots_mixed.clone()
+    mixed_clean = spots_mixed.drop('spot_id', strict=False)
     unmixed_clean = spots_unmixed.drop('spot_id', strict=False)
-    
+
     # Get columns that are unique to unmixed table
     mixed_cols = set(mixed_clean.columns)
     unmixed_cols = set(unmixed_clean.columns)
     unique_unmixed_cols = list(unmixed_cols - mixed_cols)
-    
+
     # Keep only merge keys and unique columns from unmixed
     merge_keys = ['chan', 'chan_spot_id']
     select_cols = merge_keys + unique_unmixed_cols
     unmixed_subset = unmixed_clean.select(select_cols)
-    
-    # Perform left merge
     merged = mixed_clean.join(unmixed_subset, on=merge_keys, how='left')
-    
+
     # Add unmixed_removed column - True where any unique unmixed column is null
     if unique_unmixed_cols:
         # Create condition: all unique unmixed columns are null
@@ -49,8 +99,12 @@ def merge_spots_tables(spots_mixed, spots_unmixed):
         merged = merged.with_columns(unmixed_removed=all_null)
     else:
         merged = merged.with_columns(unmixed_removed=pl.lit(False))
-    
-    return merged
+
+    merged_with_id = merged.with_row_index(name='spot_id', offset=1)
+    merged_optimized = optimize_dtypes(merged_with_id)
+
+    logger.info(f"Merge completed. Final shape: {merged_optimized.shape}")
+    return merged_optimized
 
 
 def find_mixed_spots_file(bucket: str, prefix: str, pattern: str) -> Optional[str]:
@@ -96,7 +150,12 @@ def get_base_pattern_from_unmixed(unmixed_key: str) -> str:
     return 'R3'  # Default fallback
 
 
-def load_and_merge_spots_from_s3(bucket: str, dataset_name: str, unmixed_spots_prefix: str) -> Optional[pl.DataFrame]:
+def load_and_merge_spots_from_s3(
+    bucket: str, 
+    dataset_name: str, 
+    unmixed_spots_prefix: str, 
+    valid_spots_only: bool = True
+) -> Optional[pl.DataFrame]:
     """
     Load both mixed and unmixed spots files, merge them, cache as parquet, and return merged DataFrame.
     
@@ -104,6 +163,7 @@ def load_and_merge_spots_from_s3(bucket: str, dataset_name: str, unmixed_spots_p
         bucket: S3 bucket name
         dataset_name: Dataset name (used for parquet filename)
         unmixed_spots_prefix: S3 prefix where spots files are located
+        valid_spots_only: If True, filter to only valid spots. If False, return all spots.
         
     Returns:
         Merged Polars DataFrame or None if loading failed
@@ -116,10 +176,15 @@ def load_and_merge_spots_from_s3(bucket: str, dataset_name: str, unmixed_spots_p
         logger.info(f"Loading merged data from cached parquet: {parquet_file}")
         try:
             df = pl.read_parquet(parquet_file)
-            # Filter for valid spots and return
-            df_valid = df.filter(pl.col('valid_spot'))
-            logger.info(f"Loaded DataFrame from parquet. Shape: {df_valid.shape}")
-            return df_valid
+            # Optimize data types and filter for valid spots
+            df_optimized = optimize_dtypes(df)
+            if valid_spots_only:
+                df_final = df_optimized.filter(pl.col('valid_spot'))
+                logger.info(f"Loaded DataFrame from parquet (valid spots only). Shape: {df_final.shape}")
+            else:
+                df_final = df_optimized
+                logger.info(f"Loaded DataFrame from parquet (all spots). Shape: {df_final.shape}")
+            return df_final
         except Exception as e:
             logger.error(f"Error loading parquet file: {e}", exc_info=True)
             # Fall through to regenerate the file
@@ -197,16 +262,7 @@ def load_and_merge_spots_from_s3(bucket: str, dataset_name: str, unmixed_spots_p
         except Exception as e:
             logger.error(f"Error merging DataFrames: {e}", exc_info=True)
             return None
-        
-        # 6. Add spot_id column based on index
-        try:
-            logger.info("Adding spot_id column...")
-            df_merged = df_merged.with_row_index("spot_id")
-            logger.info(f"Added spot_id column. Final shape: {df_merged.shape}")
-        except Exception as e:
-            logger.error(f"Error adding spot_id column: {e}", exc_info=True)
-            return None
-        
+
         # 7. Save merged result as parquet to cache
         try:
             # Ensure cache directory exists
@@ -219,10 +275,14 @@ def load_and_merge_spots_from_s3(bucket: str, dataset_name: str, unmixed_spots_p
             logger.error(f"Error saving parquet file: {e}", exc_info=True)
             # Continue anyway - we have the data in memory
         
-        # 8. Filter for valid spots and return
-        df_valid = df_merged.filter(pl.col('valid_spot'))
-        logger.info(f"Returning valid spots DataFrame. Shape: {df_valid.shape}")
-        return df_valid
+        # 8. Filter for valid spots (if requested) and return
+        if valid_spots_only:
+            df_final = df_merged.filter(pl.col('valid_spot'))
+            logger.info(f"Returning valid spots DataFrame. Shape: {df_final.shape}")
+        else:
+            df_final = df_merged
+            logger.info(f"Returning all spots DataFrame. Shape: {df_final.shape}")
+        return df_final
 
 
 def find_unmixed_spots_file(bucket: str, prefix: str, pattern: str) -> Optional[str]:

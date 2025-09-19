@@ -18,6 +18,19 @@ document.addEventListener('DOMContentLoaded', function () {
     const refreshButton = document.getElementById('refresh_button');
     const highlightReassignedToggle = document.getElementById('highlight_reassigned_toggle');
     const highlightStatus = document.getElementById('highlight_status');
+    const highlightRemovedToggle = document.getElementById('highlight_removed_toggle');
+    const highlightRemovedStatus = document.getElementById('highlight_removed_status');
+    const displayChanSelect = document.getElementById('display_chan_select');
+    const validSpotToggle = document.getElementById('valid_spot_toggle');
+    const validSpotStatus = document.getElementById('valid_spot_status');
+    const xlimMin = document.getElementById('xlim_min');
+    const xlimMax = document.getElementById('xlim_max');
+    const ylimMin = document.getElementById('ylim_min');
+    const ylimMax = document.getElementById('ylim_max');
+    const limitsAutoButton = document.getElementById('limits_auto');
+    const limitsFixedButton = document.getElementById('limits_fixed');
+    const limitsMinMaxButton = document.getElementById('limits_minmax');
+    const limitsPercentileButton = document.getElementById('limits_percentile');
     const summaryBarChartDom = document.getElementById('summary-bar-chart');
     const summaryHeatmapDom = document.getElementById('summary-heatmap');
     const futureChartDom = document.getElementById('future-chart');
@@ -35,12 +48,20 @@ document.addEventListener('DOMContentLoaded', function () {
     let currentPairIndex = 0;
     let currentSampleSize = parseInt(sampleSizeInput.value) || 10000;
     let highlightReassigned = false;
+    let highlightRemoved = false;
+    let displayChanMode = 'unmixed'; // 'unmixed' or 'mixed'
     let isNeuroglancerMode = false;
     let spotDetails = {}; // Will store the spot details for neuroglancer lookup
     let fusedS3Paths = {}; // Will store the fused S3 paths from the API
     let summaryStats = null; // Will store the summary stats from the API
     let ratiosMatrix = null; // Will store the ratios matrix from the API
+    let sankeyData = null; // Will store the sankey flow data from the API
     let selectedSpots = new Set();
+    
+    // Chart limits variables
+    let chartLimitsMode = 'auto'; // 'auto', 'fixed', 'minmax', 'percentile'
+    let currentXLimits = [0, 2000];
+    let currentYLimits = [0, 2000];
     
     // Neuroglancer click debounce variables
     let lastNeuroglancerClickTime = 0;
@@ -59,6 +80,7 @@ document.addEventListener('DOMContentLoaded', function () {
         '638': '#9C27B0',    // Purple
         'ambiguous': '#9E9E9E', // Grey
         'none': '#607D8B',    // Blue Grey
+        'Removed': 'rgba(0, 0, 0, 0.5)', // Black with 50% alpha for removed spots
         'default': '#2196F3'  // Blue (default)
     };
 
@@ -318,12 +340,14 @@ document.addEventListener('DOMContentLoaded', function () {
     prevChannelButton.addEventListener('click', function() {
         if (channelPairs.length === 0) return;
         currentPairIndex = (currentPairIndex - 1 + channelPairs.length) % channelPairs.length;
+        updateChannelSelector();
         updateChart();
     });
 
     nextChannelButton.addEventListener('click', function() {
         if (channelPairs.length === 0) return;
         currentPairIndex = (currentPairIndex + 1) % channelPairs.length;
+        updateChannelSelector();
         updateChart();
     });
     
@@ -401,9 +425,13 @@ document.addEventListener('DOMContentLoaded', function () {
     // Initial data fetch
     fetchData(currentSampleSize, false);
     
+    // Initialize button states
+    updateButtonStates();
+    
     // Fetch data function
     function fetchData(sampleSize, forceRefresh = false) {
-        const url = `/api/real_spots_data?sample_size=${sampleSize}${forceRefresh ? '&force_refresh=true' : ''}`;
+        const validSpotsOnly = validSpotToggle.checked;
+        const url = `/api/real_spots_data?sample_size=${sampleSize}${forceRefresh ? '&force_refresh=true' : ''}${validSpotsOnly ? '&valid_spots_only=true' : '&valid_spots_only=false'}`;
         console.log(`Fetching data with URL: ${url}`);
         
         fetch(url)
@@ -447,6 +475,12 @@ document.addEventListener('DOMContentLoaded', function () {
                     console.log(`Received ratios matrix:`, ratiosMatrix);
                 }
                 
+                // Store sankey data if available
+                if (data.sankey_data) {
+                    sankeyData = data.sankey_data;
+                    console.log(`Received sankey data:`, sankeyData);
+                }
+                
                 // Process the data for chart
                 processDataAndRenderChart(spotsData);
                 
@@ -474,9 +508,56 @@ document.addEventListener('DOMContentLoaded', function () {
         // Always convert to typed arrays for better performance
         convertToTypedArrays(spotsData);
 
+        // Create channel selector buttons
+        createChannelSelector();
+
         // Set initial channel pair
         currentPairIndex = 0;
         updateChart(spotsData);
+    }
+
+    function createChannelSelector() {
+        const channelSelector = document.getElementById('channel-selector');
+        channelSelector.innerHTML = ''; // Clear existing buttons
+        
+        channelPairs.forEach((pair, index) => {
+            const button = document.createElement('button');
+            button.textContent = `${pair[0]} vs ${pair[1]}`;
+            button.dataset.index = index;
+            
+            if (index === currentPairIndex) {
+                button.classList.add('active');
+            }
+            
+            button.addEventListener('click', function() {
+                // Remove active class from all buttons
+                channelSelector.querySelectorAll('button').forEach(btn => {
+                    btn.classList.remove('active');
+                });
+                
+                // Add active class to clicked button
+                this.classList.add('active');
+                
+                // Update current pair index and chart
+                currentPairIndex = parseInt(this.dataset.index);
+                updateChart();
+            });
+            
+            channelSelector.appendChild(button);
+        });
+    }
+
+    function updateChannelSelector() {
+        const channelSelector = document.getElementById('channel-selector');
+        const buttons = channelSelector.querySelectorAll('button');
+        
+        buttons.forEach((button, index) => {
+            if (index === currentPairIndex) {
+                button.classList.add('active');
+            } else {
+                button.classList.remove('active');
+            }
+        });
     }
 
     // Convert data to typed arrays for better performance
@@ -508,6 +589,7 @@ document.addEventListener('DOMContentLoaded', function () {
         const channels = new Array(spotsData.length);
         const unmixedChans = new Array(spotsData.length);
         const reassigned = new Array(spotsData.length);
+        const removed = new Array(spotsData.length);
         
         // Fill typed arrays
         for (let i = 0; i < spotsData.length; i++) {
@@ -527,6 +609,7 @@ document.addEventListener('DOMContentLoaded', function () {
             channels[i] = dataPoint.chan;
             unmixedChans[i] = dataPoint.unmixed_chan || 'none';
             reassigned[i] = dataPoint.reassigned || false;
+            removed[i] = dataPoint.unmixed_removed || false;
         }
         
         // Attach typed arrays to spotsData object for later use
@@ -535,6 +618,7 @@ document.addEventListener('DOMContentLoaded', function () {
         spotsData.channels = channels;
         spotsData.unmixedChans = unmixedChans;
         spotsData.reassigned = reassigned;
+        spotsData.removed = removed;
     }
 
     function updateChart(newData = null) {
@@ -570,7 +654,7 @@ document.addEventListener('DOMContentLoaded', function () {
         const xField = `chan_${xChan}_intensity`;
         const yField = `chan_${yChan}_intensity`;
         
-        // Create series data grouped by unmixed channel
+        // Create series data grouped by display channel (mixed or unmixed)
         const seriesData = {};
         const uniqueChannels = [];
         
@@ -583,22 +667,29 @@ document.addEventListener('DOMContentLoaded', function () {
         const channels = allChartData.channels;
         const unmixedChans = allChartData.unmixedChans;
         const reassigned = allChartData.reassigned;
+        const removed = allChartData.removed;
         
         for (let i = 0; i < allChartData.length; i++) {
-            const unmixedChan = unmixedChans[i];
+            // Use either unmixed channel or original channel based on display mode
+            let displayChan = displayChanMode === 'mixed' ? channels[i] : unmixedChans[i];
+            
+            // Special handling: if unmixed channel is 'none', display as 'Removed'
+            if (displayChanMode === 'unmixed' && (unmixedChans[i] === 'none' || unmixedChans[i] === null || unmixedChans[i] === undefined)) {
+                displayChan = 'Removed';
+            }
             
             // Add to unique channels if not already there
-            if (!uniqueChannels.includes(unmixedChan)) {
-                uniqueChannels.push(unmixedChan);
+            if (!uniqueChannels.includes(displayChan)) {
+                uniqueChannels.push(displayChan);
             }
             
             // Initialize series if not exists
-            if (!seriesData[unmixedChan]) {
-                seriesData[unmixedChan] = [];
+            if (!seriesData[displayChan]) {
+                seriesData[displayChan] = [];
             }
             
             // Add data point using typed array values for faster access
-            seriesData[unmixedChan].push({
+            seriesData[displayChan].push({
                 name: `Spot ${spotIds[i]}`,
                 value: [
                     xValues[i],            // x-coordinate (first channel intensity)
@@ -606,40 +697,80 @@ document.addEventListener('DOMContentLoaded', function () {
                     rValues[i],            // size (r value)
                     channels[i],           // category (chan)
                     spotIds[i],            // ID
-                    unmixedChan,           // unmixed channel
+                    unmixedChans[i],       // unmixed channel
                     distValues[i],         // distance
                     xChan,                 // x-axis channel
                     yChan,                 // y-axis channel
-                    reassigned[i]          // reassigned flag
+                    reassigned[i],         // reassigned flag
+                    removed[i]             // removed flag
                 ]
             });
         }
         
-        // Build series array for each unmixed channel
-        const series = uniqueChannels.sort().map(channel => ({
-            name: `Unmixed: ${channel}`,
+        // Build series array for each channel with custom sorting
+        // Put "Removed" series at the end for better visual hierarchy
+        const sortedChannels = uniqueChannels.sort((a, b) => {
+            if (a === 'Removed') return 1;
+            if (b === 'Removed') return -1;
+            return a.localeCompare(b);
+        });
+        
+        const series = sortedChannels.map(channel => ({
+            name: channel, // Remove the Mixed/Unmixed prefix from individual labels
             type: 'scatter',
             data: seriesData[channel],
-            symbolSize: 5,
-            // Add large dataset mode optimizations
-            large: true,
+            symbol: channel === 'Removed' ? 'triangle' : 'circle', // Use triangle symbol for removed spots 
+            symbolSize: channel === 'Removed' ? 8 : 5, // Larger size for removed symbols
+            // Add large dataset mode optimizations (but disable for Removed series to ensure visibility)
+            large: channel !== 'Removed',
             largeThreshold: LARGE_DATA_THRESHOLD,
             itemStyle: {
                 color: function(params) {
-                    // If highlighting reassigned is active, show non-reassigned in gray
-                    if (highlightReassigned) {
-                        const isReassigned = params.data.value[9];
-                        if (!isReassigned) {
-                            return '#cccccc'; // Gray for non-reassigned when highlighting
-                        }
+                    // Special handling for Removed series - always black with 50% alpha
+                    if (channel === 'Removed') {
+                        return 'rgba(0, 0, 0, 0.5)'; // Black with 50% alpha for removed spots
                     }
+                    
+                    const isReassigned = params.data.value[9];
+                    const isRemoved = params.data.value[10];
+                    
+                    // If highlighting reassigned is active, show non-reassigned in gray
+                    if (highlightReassigned && !isReassigned) {
+                        return '#cccccc'; // Gray for non-reassigned when highlighting
+                    }
+                    
+                    // If highlighting removed is active, show non-removed in gray
+                    if (highlightRemoved && !isRemoved) {
+                        return '#cccccc'; // Gray for non-removed when highlighting
+                    }
+                    
                     return COLORS[channel] || COLORS.default;
                 },
-                // Add visual styling for reassigned spots
+                // Add visual styling for reassigned and removed spots
                 borderWidth: function(params) {
-                    return params.data.value[9] ? 2 : 0; // Add border if reassigned
+                    const isReassigned = params.data.value[9];
+                    const isRemoved = params.data.value[10];
+                    
+                    // Add border if reassigned or removed
+                    if (isReassigned || isRemoved) {
+                        return 2;
+                    }
+                    return 0;
                 },
-                borderColor: '#ffffff',
+                borderColor: function(params) {
+                    const isReassigned = params.data.value[9];
+                    const isRemoved = params.data.value[10];
+                    
+                    // Different border colors for different states
+                    if (isReassigned && isRemoved) {
+                        return '#ff00ff'; // Magenta for both reassigned and removed
+                    } else if (isReassigned) {
+                        return '#ffffff'; // White for reassigned
+                    } else if (isRemoved) {
+                        return '#000000'; // Black for removed
+                    }
+                    return '#ffffff';
+                },
                 borderType: 'solid',
                 opacity: function(params) {
                     // If highlighting reassigned, make non-reassigned more transparent
@@ -666,10 +797,13 @@ document.addEventListener('DOMContentLoaded', function () {
             // Space required for all sliders
             width: 60,   // Width of each slider
             gap: 20,     // Gap between sliders
-            startRight: 40,  // Distance from right edge of chart
-            
+            startRight: 20,  // Distance from right edge of chart
+
+            // Move sliders lower in the plot area
+            top: '45%', // Move sliders down (default is 'center')
+
             // Common slider properties
-            itemWidth: 30,
+            itemWidth: 20,
             itemHeight: 200,
             textGap: 20,
             handleSize: 10,
@@ -686,30 +820,42 @@ document.addEventListener('DOMContentLoaded', function () {
         const seriesIndices = series.map((_, index) => index);
         
         option = {
-            title: {
-                text: `Intensity Scatter Plot: Channel ${xChan} vs ${yChan}`,
-                textStyle: {
+            // title: {
+            //     text: `Intensity Scatter Plot: Channel ${xChan} vs ${yChan}`,
+            //     textStyle: {
+            //         fontSize: 16,
+            //         fontWeight: 'bold'
+            //     }
+            // },
+            // Add a separate title element for the legend
+            graphic: [{
+                type: 'text',
+                right: 80, // Position it above the legend
+                top: 60,
+                style: {
+                    text: displayChanMode === 'mixed' ? 'Mixed' : 'Unmixed',
                     fontSize: 16,
-                    fontWeight: 'bold'
+                    fontWeight: 'bold',
+                    fill: '#333'
                 }
-            },
-            color: uniqueChannels.map(chan => COLORS[chan] || COLORS.default), // Fixed colors for legend
+            }],
+            color: sortedChannels.map(chan => COLORS[chan] || COLORS.default), // Fixed colors for legend
             legend: {
                 type: 'scroll',
                 orient: 'vertical',
-                right: 10,
-                top: 50,
+                right: 45,
+                top: 85, // Move down to make room for graphic title
                 bottom: 50,
                 textStyle: {
                     fontSize: 14
                 },
-                selected: uniqueChannels.reduce((acc, chan) => {
-                    acc[`Unmixed: ${chan}`] = true;
+                selected: sortedChannels.reduce((acc, chan) => {
+                    acc[chan] = true; // Use channel name without prefix
                     return acc;
                 }, {})
             },
             grid: {
-                right: totalSliderWidth + sliderConfig.startRight + 120, // Make room for sliders and legend
+                right: totalSliderWidth + sliderConfig.startRight + 40, // Make room for sliders and legend
                 bottom: 70 // Still need some bottom space for axis labels
             },
             tooltip: {
@@ -717,15 +863,18 @@ document.addEventListener('DOMContentLoaded', function () {
                 formatter: function (params) {
                     const item = params.data.value;
                     const reassignedText = item[9] ? '<span style="color:red;font-weight:bold">⚠ Reassigned</span>' : '';
+                    const removedText = item[10] ? '<span style="color:orange;font-weight:bold">🗑 Removed</span>' : '';
+                    const statusText = [reassignedText, removedText].filter(t => t).join('<br/>');
+                    
                     return `<div style="font-size: 14px;">
                            ID: ${item[4]}<br/>
                            ${xChan} Intensity: ${item[0].toFixed(2)}<br/>
                            ${yChan} Intensity: ${item[1].toFixed(2)}<br/>
                            R: ${item[2].toFixed(2)}<br/>
-                           Original Chan: ${item[3]}<br/>
-                           Unmixed: ${item[5]}<br/>
+                           Mixed Chan: ${item[3]}<br/>
+                           Unmixed Chan: ${item[5]}<br/>
                            Dist: ${item[6].toFixed(2)}<br/>
-                           ${reassignedText}
+                           ${statusText ? statusText + '<br/>' : ''}
                            </div>`;
                 },
                 textStyle: {
@@ -771,7 +920,10 @@ document.addEventListener('DOMContentLoaded', function () {
                     fontWeight: 'bold'
                 },
                 axisLabel: {
-                    fontSize: 16
+                    fontSize: 16,
+                    formatter: function(value) {
+                        return Math.round(value);
+                    }
                 }
             },
             yAxis: { 
@@ -784,7 +936,10 @@ document.addEventListener('DOMContentLoaded', function () {
                     fontWeight: 'bold'
                 },
                 axisLabel: {
-                    fontSize: 16
+                    fontSize: 16,
+                    formatter: function(value) {
+                        return Math.round(value);
+                    }
                 }
             },
             dataZoom: [
@@ -839,7 +994,7 @@ document.addEventListener('DOMContentLoaded', function () {
                     },
                     ...sliderConfig,
                     handleStyle: {
-                        color: '#f44336'
+                        color: '#f83628ff'
                     },
                     inRange: {
                         opacity: 1
@@ -854,8 +1009,19 @@ document.addEventListener('DOMContentLoaded', function () {
             series: series
         };
 
+        // Apply chart limits based on current mode
+        if (chartLimitsMode !== 'auto') {
+            option.xAxis.min = currentXLimits[0];
+            option.xAxis.max = currentXLimits[1];
+            option.yAxis.min = currentYLimits[0];
+            option.yAxis.max = currentYLimits[1];
+        }
+
         // Initialize chart with all options
         myChart.setOption(option, true);
+        
+        // Ensure chart fills its container properly
+        setTimeout(() => myChart.resize(), 0);
         
         // Store current processed data for lasso selection
         const allProcessedData = [].concat(...Object.values(seriesData));
@@ -1194,10 +1360,188 @@ document.addEventListener('DOMContentLoaded', function () {
         updateChart();
     });
 
-    // Function to update the summary charts (bar chart and heatmap)
+    // Event listener for display channel mode dropdown
+    displayChanSelect.addEventListener('change', function() {
+        displayChanMode = this.value;
+        console.log(`Display channel mode changed to: ${displayChanMode}`);
+        
+        // Update chart with new channel display mode
+        updateChart();
+    });
+
+    // Event listener for highlight removed toggle
+    highlightRemovedToggle.addEventListener('change', function() {
+        highlightRemoved = this.checked;
+        highlightRemovedStatus.textContent = highlightRemoved ? 'On' : 'Off';
+        
+        // Update toggle style
+        const toggleLabel = this.nextElementSibling;
+        const toggleSpan = toggleLabel.querySelector('span');
+        
+        if (highlightRemoved) {
+            toggleLabel.style.backgroundColor = '#9c27b0'; // Purple when active
+            toggleSpan.style.left = '22px';
+        } else {
+            toggleLabel.style.backgroundColor = '#ccc'; // Gray when inactive
+            toggleSpan.style.left = '2px';
+        }
+        
+        // Update chart with new highlighting settings
+        updateChart();
+    });
+
+    // Event listener for valid spot toggle
+    validSpotToggle.addEventListener('change', function() {
+        validSpotStatus.textContent = this.checked ? 'On' : 'Off';
+        
+        // Update toggle style
+        const toggleLabel = this.nextElementSibling;
+        const toggleSpan = toggleLabel.querySelector('span');
+        
+        if (this.checked) {
+            toggleLabel.style.backgroundColor = '#4CAF50'; // Green when active
+            toggleSpan.style.left = '22px';
+        } else {
+            toggleLabel.style.backgroundColor = '#ccc'; // Gray when inactive
+            toggleSpan.style.left = '2px';
+        }
+        
+        // Reload data with new filter setting
+        fetchData(currentSampleSize, false);
+    });
+
+    // Chart limits event listeners
+    function updateButtonStates() {
+        // Reset all button styles
+        limitsAutoButton.style.backgroundColor = 'white';
+        limitsFixedButton.style.backgroundColor = 'white';
+        limitsMinMaxButton.style.backgroundColor = 'white';
+        limitsPercentileButton.style.backgroundColor = 'white';
+        
+        // Highlight active button
+        if (chartLimitsMode === 'auto') {
+            limitsAutoButton.style.backgroundColor = '#e3f2fd';
+        } else if (chartLimitsMode === 'fixed') {
+            limitsFixedButton.style.backgroundColor = '#e3f2fd';
+        } else if (chartLimitsMode === 'minmax') {
+            limitsMinMaxButton.style.backgroundColor = '#e3f2fd';
+        } else if (chartLimitsMode === 'percentile') {
+            limitsPercentileButton.style.backgroundColor = '#e3f2fd';
+        }
+    }
+
+    // Input change listeners
+    [xlimMin, xlimMax, ylimMin, ylimMax].forEach(input => {
+        input.addEventListener('change', function() {
+            if (chartLimitsMode === 'fixed') {
+                currentXLimits = [parseFloat(xlimMin.value), parseFloat(xlimMax.value)];
+                currentYLimits = [parseFloat(ylimMin.value), parseFloat(ylimMax.value)];
+                updateChart();
+            }
+        });
+    });
+
+    // Auto button
+    limitsAutoButton.addEventListener('click', function() {
+        chartLimitsMode = 'auto';
+        updateButtonStates();
+        updateChart();
+    });
+
+    // Fixed limits button
+    limitsFixedButton.addEventListener('click', function() {
+        chartLimitsMode = 'fixed';
+        currentXLimits = [parseFloat(xlimMin.value), parseFloat(xlimMax.value)];
+        currentYLimits = [parseFloat(ylimMin.value), parseFloat(ylimMax.value)];
+        updateButtonStates();
+        updateChart();
+    });
+
+    // Min/Max button
+    limitsMinMaxButton.addEventListener('click', function() {
+        if (chartLimitsMode === 'minmax') {
+            // Toggle off to auto
+            chartLimitsMode = 'auto';
+        } else {
+            // Toggle on
+            chartLimitsMode = 'minmax';
+            calculateMinMaxLimits();
+        }
+        updateButtonStates();
+        updateChart();
+    });
+
+    // 1-95% button  
+    limitsPercentileButton.addEventListener('click', function() {
+        if (chartLimitsMode === 'percentile') {
+            // Toggle off to auto
+            chartLimitsMode = 'auto';
+        } else {
+            // Toggle on
+            chartLimitsMode = 'percentile';
+            calculatePercentileLimits();
+        }
+        updateButtonStates();
+        updateChart();
+    });
+
+    function calculateMinMaxLimits() {
+        if (!allChartData || allChartData.length === 0 || channelPairs.length === 0) return;
+        
+        const xChan = channelPairs[currentPairIndex][0];
+        const yChan = channelPairs[currentPairIndex][1];
+        const xField = `chan_${xChan}_intensity`;
+        const yField = `chan_${yChan}_intensity`;
+        
+        const xValues = allChartData.typedArrays[xField];
+        const yValues = allChartData.typedArrays[yField];
+        
+        const xMin = Math.min(...xValues);
+        const xMax = Math.max(...xValues);
+        const yMin = Math.min(...yValues);  
+        const yMax = Math.max(...yValues);
+        
+        currentXLimits = [xMin, xMax];
+        currentYLimits = [yMin, yMax];
+        
+        // Update input fields
+        xlimMin.value = Math.round(xMin);
+        xlimMax.value = Math.round(xMax);
+        ylimMin.value = Math.round(yMin);
+        ylimMax.value = Math.round(yMax);
+    }
+
+    function calculatePercentileLimits() {
+        if (!allChartData || allChartData.length === 0 || channelPairs.length === 0) return;
+        
+        const xChan = channelPairs[currentPairIndex][0];
+        const yChan = channelPairs[currentPairIndex][1];
+        const xField = `chan_${xChan}_intensity`;
+        const yField = `chan_${yChan}_intensity`;
+        
+        const xValues = Array.from(allChartData.typedArrays[xField]).sort((a, b) => a - b);
+        const yValues = Array.from(allChartData.typedArrays[yField]).sort((a, b) => a - b);
+        
+        const xMin = xValues[Math.floor(xValues.length * 0.01)];
+        const xMax = xValues[Math.floor(xValues.length * 0.95)];
+        const yMin = yValues[Math.floor(yValues.length * 0.01)];
+        const yMax = yValues[Math.floor(yValues.length * 0.95)];
+        
+        currentXLimits = [xMin, xMax];
+        currentYLimits = [yMin, yMax];
+        
+        // Update input fields
+        xlimMin.value = Math.round(xMin);
+        xlimMax.value = Math.round(xMax);
+        ylimMin.value = Math.round(yMin);
+        ylimMax.value = Math.round(yMax);
+    }
+
+    // Function to update the summary charts (bar chart, heatmap, and sankey)
     function updateSummaryCharts() {
         updateSummaryBarChart();
         updateSummaryHeatmap();
+        updateSankeyChart();
     }
     
     // Function to update the summary bar chart
@@ -1440,7 +1784,193 @@ document.addEventListener('DOMContentLoaded', function () {
         summaryHeatmap.resize();
     }
 
-    // Initialize the future chart with a placeholder
+    // Function to update the Sankey flow chart
+    function updateSankeyChart() {
+        if (!sankeyData) {
+            console.log("No Sankey data available from backend");
+            futureChart.setOption({
+                title: {
+                    text: 'Channel Flow Analysis\n(No data available)',
+                    left: 'center',
+                    top: 'top',
+                    textStyle: {
+                        color: '#999',
+                        fontStyle: 'italic',
+                        fontSize: 16
+                    }
+                }
+            });
+            return;
+        }
+
+        console.log("Updating Sankey chart with backend data");
+        console.log(`Processing ${sankeyData.total_spots} total spots from backend`);
+
+        // Prepare nodes for ECharts Sankey
+        const nodes = sankeyData.nodes.map(node => ({
+            name: node.name,
+            itemStyle: {
+                color: node.channel === 'Removed' ? 
+                    COLORS.Removed : 
+                    (COLORS[node.channel] || COLORS.default)
+            }
+        }));
+
+        // Prepare links for ECharts Sankey
+        const links = sankeyData.links.map(link => {
+            const isUnchanged = link.flow_type === 'unchanged';
+            const isRemoved = link.flow_type === 'removed';
+            
+            return {
+                source: link.source,
+                target: link.target,
+                value: link.value,
+                itemStyle: {
+                    color: isUnchanged ? 
+                        (COLORS[link.source.split(' ')[0]] || COLORS.default) : // Use original channel color for unchanged
+                        isRemoved ?
+                        'rgba(255, 87, 34, 0.6)' : // Orange-red for removed
+                        'rgba(150, 150, 150, 0.6)' // Gray for reassigned
+                },
+                lineStyle: {
+                    color: isUnchanged ? 
+                        (COLORS[link.source.split(' ')[0]] || COLORS.default) : // Use original channel color for unchanged
+                        isRemoved ?
+                        'rgba(255, 87, 34, 0.6)' : // Orange-red for removed
+                        'rgba(150, 150, 150, 0.6)' // Gray for reassigned
+                }
+            };
+        });
+
+        const sankeyOption = {
+            title: {
+                text: 'Channel Flow Analysis',
+                left: 'center',
+                top: 'top',
+                textStyle: {
+                    fontSize: 14,
+                    fontWeight: 'bold'
+                }
+            },
+            tooltip: {
+                trigger: 'item',
+                triggerOn: 'mousemove',
+                formatter: function(params) {
+                    if (params.dataType === 'edge') {
+                        // Find the corresponding link data from backend
+                        const linkData = sankeyData ? sankeyData.links.find(link => 
+                            link.source === params.data.source && link.target === params.data.target
+                        ) : null;
+                        
+                        if (linkData) {
+                            const [original] = linkData.source.split(' (');
+                            const [final] = linkData.target.split(' (');
+                            
+                            let flowType = '';
+                            if (linkData.flow_type === 'unchanged') {
+                                flowType = '<span style="color: #4CAF50;">✓ Unchanged</span>';
+                            } else if (linkData.flow_type === 'removed') {
+                                flowType = '<span style="color: #646464ff;">✗ Removed</span>';
+                            } else {
+                                flowType = '<span style="color: #ff0000ff;">↻ Reassigned</span>';
+                            }
+                            
+                            return `<div style="font-size: 13px;">
+                                    <div style="font-weight: bold; margin-bottom: 5px;">${flowType}</div>
+                                    <div>${original} → ${final}</div>
+                                    <div style="margin-top: 5px;">
+                                        <strong>${linkData.value.toLocaleString()}</strong> spots (${linkData.percentage}%)
+                                    </div>
+                                    </div>`;
+                        }
+                        
+                        // Fallback for old data structure
+                        const totalSpots = sankeyData ? sankeyData.total_spots : (allChartData ? allChartData.length : 1);
+                        const percentage = ((params.value / totalSpots) * 100).toFixed(1);
+                        const [original] = params.data.source.split(' (');
+                        const [final] = params.data.target.split(' (');
+                        
+                        let flowType = '';
+                        if (original === final) {
+                            flowType = '<span style="color: #4CAF50;">✓ Unchanged</span>';
+                        } else if (final === 'Removed') {
+                            flowType = '<span style="color: #636363ff;">✗ Removed</span>';
+                        } else {
+                            flowType = '<span style="color: #fc0a0aff;">↻ Reassigned</span>';
+                        }
+                        
+                        return `<div style="font-size: 13px;">
+                                <div style="font-weight: bold; margin-bottom: 5px;">${flowType}</div>
+                                <div>${original} → ${final}</div>
+                                <div style="margin-top: 5px;">
+                                    <strong>${params.value.toLocaleString()}</strong> spots (${percentage}%)
+                                </div>
+                                </div>`;
+                    } else {
+                        // Node tooltip
+                        const [channel, type] = params.name.split(' (');
+                        const isOriginal = type === 'Original)';
+                        
+                        // Calculate node total from backend Sankey links data
+                        let nodeCount = 0;
+                        if (isOriginal) {
+                            // Sum all flows starting from this original channel
+                            nodeCount = sankeyData.links
+                                .filter(link => link.source === params.name)
+                                .reduce((sum, link) => sum + link.value, 0);
+                        } else {
+                            // Sum all flows ending at this final channel
+                            nodeCount = sankeyData.links
+                                .filter(link => link.target === params.name)
+                                .reduce((sum, link) => sum + link.value, 0);
+                        }
+                        
+                        const percentage = ((nodeCount / sankeyData.total_spots) * 100).toFixed(1);
+                        return `<div style="font-size: 13px;">
+                                <div style="font-weight: bold;">${channel}</div>
+                                <div>${isOriginal ? 'Original' : 'Final'} channel</div>
+                                <div style="margin-top: 5px;">
+                                    <strong>${nodeCount.toLocaleString()}</strong> spots (${percentage}%)
+                                </div>
+                                </div>`;
+                    }
+                }
+            },
+            series: [{
+                type: 'sankey',
+                layout: 'none',
+                emphasis: {
+                    focus: 'adjacency'
+                },
+                data: nodes,
+                links: links,
+                orient: 'horizontal',
+                label: {
+                    position: 'outside',
+                    fontSize: 11,
+                    formatter: function(params) {
+                        const [channel] = params.name.split(' (');
+                        return channel;
+                    }
+                },
+                lineStyle: {
+                    curveness: 0.3
+                },
+                left: '5%',
+                right: '5%',
+                top: '15%',
+                bottom: '5%'
+            }]
+        };
+
+        futureChart.setOption(sankeyOption);
+        futureChart.resize();
+        
+        console.log(`Sankey chart created with ${nodes.length} nodes and ${links.length} links from backend data`);
+        console.log(`Backend used threshold of ${sankeyData.threshold_used} spots per flow`);
+    }
+
+    // Initialize the future chart with a placeholder until data loads
     futureChart.setOption({
         title: {
             text: 'Future Visualization \n (not implemented)',

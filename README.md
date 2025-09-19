@@ -7,7 +7,9 @@
 ![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen?logo=codecov)
 ![Python](https://img.shields.io/badge/python->=3.10-blue?logo=python)
 
-
+## App UI
+![Spot Visualization](img/seespot-app-v.png)
+*Interactive dashboard showing spot channel analysis with Sankey flow diagram, scatter plot, and summary statistics*
 
 ## start-up (local)
 + Install
@@ -17,48 +19,39 @@
 cd /home/matt.davis/code/see-spot && source .venv/bin/activate && cd src && uvicorn see_spot.app:app --host 0.0.0.0 --port 9999 --reload
 ```
 
+## Changelog
++ 09-19-2025
+  + backend downloads mixed + unmixed tables, merges and saves as .parquet (massive compression)
+  + polars for dataframe manipulation (huge speedup)
+  + optimized data types in tables, reduced memory demands
+  + added removed_spots key in data table and plotting in frontend
+  + Added mixed/unmixed channel display mode toggle with dedicated UI controls
+  + Implemented chart axis limit controls (auto, fixed, min/max, percentile modes)
+  + Added Sankey flow diagram showing channel reassignment patterns with backend data calculation
+  + Enhanced data filtering with valid spots toggle and removed spots highlighting
+
 ## Contributing
 
 ### Linters and testing
-
-There are several libraries used to run linters, check documentation, and run tests.
-
-- Please test your changes using the **coverage** library, which will run the tests and log a coverage report:
-
 ```bash
 coverage run -m unittest discover && coverage report
-```
-
-- Use **interrogate** to check that modules, methods, etc. have been documented thoroughly:
-
-```bash
 interrogate .
-```
-
-- Use **flake8** to check that code is up to standards (no unused imports, etc.):
-```bash
 flake8 .
-```
-
-- Use **black** to automatically format the code into PEP standards:
-```bash
 black .
-```
-
-- Use **isort** to automatically sort import statements:
-```bash
 isort .
 ```
 
 ### Pull requests
 
-For internal members, please create a branch. For external members, please fork the repository and open a pull request from the fork. We'll primarily use [Angular](https://github.com/angular/angular/blob/main/CONTRIBUTING.md#commit) style for commit messages. Roughly, they should follow the pattern:
-```text
-<type>(<scope>): <short summary>
-```
++ Internal members, please create a branch. 
++ External members, fork repo and open PR
 
-where scope (optional) describes the packages affected by the code changes and type (mandatory) is one of:
+### Commit style
++ We primarily use [Angular](https://github.com/angular/angular/blob/main/CONTRIBUTING.md#commit) style for commit messages. Roughly, they should follow the pattern: 
++ `<type>: <short summary>`
 
+
+#### Type:
 - **build**: Changes that affect build tools or external dependencies (example scopes: pyproject.toml, setup.py)
 - **ci**: Changes to our CI configuration files and scripts (examples: .github/workflows/ci.yml)
 - **docs**: Documentation only changes
