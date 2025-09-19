@@ -228,8 +228,8 @@
                     // Store session ID in localStorage
                     localStorage.setItem('see_spot_session_id', result.session_id);
                     
-                    // Redirect to main app
-                    window.location.href = '/unmixed-spots';
+                    // Redirect to main app with session ID in URL
+                    window.location.href = `/unmixed-spots?session_id=${result.session_id}`;
                 } else {
                     errorDiv.textContent = result.error || 'Failed to create session';
                     loadingDiv.style.display = 'none';
@@ -256,8 +256,8 @@
                 .then(response => response.json())
                 .then(result => {
                     if (result.valid) {
-                        // Session is valid, redirect to main app
-                        window.location.href = '/unmixed-spots';
+                        // Session is valid, redirect to main app with session ID
+                        window.location.href = `/unmixed-spots?session_id=${sessionId}`;
                     } else {
                         // Session invalid, clear it
                         localStorage.removeItem('see_spot_session_id');

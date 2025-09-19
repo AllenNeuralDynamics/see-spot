@@ -6,6 +6,33 @@ document.addEventListener('DOMContentLoaded', function () {
         return;
     }
 
+    // Verify session is still valid on page load
+    fetch('/api/session/verify', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ session_id: sessionId })
+    })
+    .then(response => response.json())
+    .then(result => {
+        if (!result.valid) {
+            // Session invalid, clear it and redirect
+            localStorage.removeItem('see_spot_session_id');
+            window.location.href = '/';
+            return;
+        }
+        // Session is valid, continue with app initialization
+        initializeApp();
+    })
+    .catch(error => {
+        console.error('Error verifying session:', error);
+        localStorage.removeItem('see_spot_session_id');
+        window.location.href = '/';
+        return;
+    });
+
+    function initializeApp() {
     // Helper function to make API requests with session ID
     function fetchWithSession(url, options = {}) {
         const defaultOptions = {
@@ -1993,4 +2020,6 @@ document.addEventListener('DOMContentLoaded', function () {
             }
         }
     });
-}); 
+    
+    } // End of initializeApp function
+}); // End of DOMContentLoaded 
