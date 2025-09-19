@@ -137,3 +137,7 @@ dmypy.json
 
 # MacOs
 **/.DS_Store
+
+# Session database (created locally on each deployment)
+sessions.db
+src/sessions.db

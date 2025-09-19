@@ -1,18 +1,14 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-import numpy as np
-import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 import uvicorn
 import logging
-import os
-import json
 from pathlib import Path
 import polars as pl
 import itertools
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
 
 # Import your modules
 from see_spot.s3_handler import s3_handler
@@ -21,6 +17,7 @@ from see_spot.s3_utils import (
     load_ratios_from_s3, load_summary_stats_from_s3,
     load_processing_manifest_from_s3, load_and_merge_spots_from_s3
 )
+from see_spot.session_manager import session_manager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -38,18 +35,35 @@ templates = Jinja2Templates(directory=templates_dir)
 
 # Configuration for the spots data
 S3_BUCKET = "aind-open-data"
-DATA_PREFIX = "HCR_749315_2025-05-08_14-00-00_processed_2025-05-17_22-15-31"  # set default for app load
+DEFAULT_DATA_PREFIX = "HCR_749315_2025-05-08_14-00-00_processed_2025-05-17_22-15-31"  # default for new sessions
 SAMPLE_SIZE = 5000
 
-# In-memory cache for DataFrame to avoid reloading on every request
-df_cache = {
-    "data": None,
-    "last_loaded": None,
-    "target_key": None,
-    "processing_manifest": None,
-    "spot_channels_from_manifest": None,
-    "sankey_data": None  # Cache Sankey data to avoid recalculation
-}
+
+def get_session_from_request(request: Request) -> Optional[str]:
+    """Extract session ID from request headers or cookies."""
+    # Try to get session ID from header first
+    session_id = request.headers.get('X-Session-ID')
+    if not session_id:
+        # Try to get from query parameter (for initial requests)
+        session_id = request.query_params.get('session_id')
+    if not session_id:
+        # Try to get from form data for POST requests
+        if hasattr(request, '_json') and request._json:
+            session_id = request._json.get('session_id')
+    return session_id
+
+
+def require_session(request: Request) -> Dict[str, Any]:
+    """Get session data from request, raising HTTPException if not found."""
+    session_id = get_session_from_request(request)
+    if not session_id:
+        raise HTTPException(status_code=401, detail="Session ID required")
+    
+    session_data = session_manager.get_session(session_id)
+    if not session_data:
+        raise HTTPException(status_code=401, detail="Invalid session")
+    
+    return session_data
 
 
 def get_channel_pairs(df: pl.DataFrame) -> List[Tuple[str, str]]:
@@ -57,6 +71,7 @@ def get_channel_pairs(df: pl.DataFrame) -> List[Tuple[str, str]]:
     intensity_cols = [col for col in df.columns if col.endswith('_intensity')]
     channels = sorted([col.split('_')[1] for col in intensity_cols])
     return list(itertools.combinations(channels, 2))
+
 
 def calculate_sankey_data_from_polars(df_polars: pl.DataFrame) -> Dict[str, Any]:
     """
@@ -248,14 +263,93 @@ def calculate_sankey_data(df: Any) -> Dict[str, Any]:
     }
 
 
+@app.post("/api/session/create")
+async def create_session(request: Request):
+    """Create a new user session."""
+    try:
+        data = await request.json()
+        username = data.get("username", "").strip()
+        data_prefix = data.get("data_prefix") or DEFAULT_DATA_PREFIX
+        
+        if not username:
+            return JSONResponse(status_code=400, content={"error": "Username is required"})
+        
+        # Validate username (simple rules for secure network)
+        if len(username) < 2 or len(username) > 50:
+            return JSONResponse(status_code=400, content={"error": "Username must be 2-50 characters"})
+        
+        session_id = session_manager.create_session(username, data_prefix)
+        
+        return {
+            "session_id": session_id,
+            "username": username,
+            "data_prefix": data_prefix,
+            "message": "Session created successfully"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error creating session: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/api/session/verify")
+async def verify_session(request: Request):
+    """Verify if a session is still valid."""
+    try:
+        data = await request.json()
+        session_id = data.get("session_id")
+        
+        if not session_id:
+            return {"valid": False, "error": "Session ID required"}
+        
+        session_data = session_manager.get_session(session_id)
+        
+        if session_data:
+            return {
+                "valid": True,
+                "username": session_data["username"],
+                "data_prefix": session_data["data_prefix"]
+            }
+        else:
+            return {"valid": False, "error": "Session not found"}
+            
+    except Exception as e:
+        logger.error(f"Error verifying session: {e}", exc_info=True)
+        return {"valid": False, "error": str(e)}
+
+
+@app.get("/api/session/info")
+async def get_session_info(request: Request):
+    """Get current session information."""
+    try:
+        session_data = require_session(request)
+        return {
+            "username": session_data["username"],
+            "data_prefix": session_data["data_prefix"],
+            "session_id": session_data["session_id"]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting session info: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 @app.get("/api/real_spots_data")
 async def get_real_spots_data(
+    request: Request,
     sample_size: int = SAMPLE_SIZE,
     force_refresh: bool = False,
     valid_spots_only: bool = False
 ):
-    logger.info(f"Real spots data requested with sample size: {sample_size}, "
-                f"force_refresh: {force_refresh}, valid_spots_only: {valid_spots_only}")
+    # Get session data
+    session_data = require_session(request)
+    data_prefix = session_data["data_prefix"]
+    df_cache = session_manager.get_session_cache(session_data["session_id"])
+    
+    logger.info(f"Real spots data requested for session {session_data['username']} "
+                f"with sample size: {sample_size}, force_refresh: {force_refresh}, "
+                f"valid_spots_only: {valid_spots_only}, data_prefix: {data_prefix}")
 
     # Check if we can use cached DataFrame
     if not force_refresh and df_cache["data"] is not None:
@@ -266,7 +360,7 @@ async def get_real_spots_data(
         spot_channels_from_manifest = df_cache.get("spot_channels_from_manifest")
         if not processing_manifest or not spot_channels_from_manifest:
             # Construct manifest path and load
-            manifest_key = f"{DATA_PREFIX}/derived/processing_manifest.json"
+            manifest_key = f"{data_prefix}/derived/processing_manifest.json"
             logger.info(f"Attempting to load processing manifest from: s3://{S3_BUCKET}/{manifest_key}")
             processing_manifest = load_processing_manifest_from_s3(S3_BUCKET, manifest_key)
             if processing_manifest and "spot_channels" in processing_manifest:
@@ -280,7 +374,7 @@ async def get_real_spots_data(
     else:
         # Need to load DataFrame from S3
         # 1. Load processing manifest to determine paths and channels
-        manifest_key = f"{DATA_PREFIX}/derived/processing_manifest.json"
+        manifest_key = f"{data_prefix}/derived/processing_manifest.json"
         logger.info(f"Attempting to load processing manifest from: s3://{S3_BUCKET}/{manifest_key}")
         processing_manifest = load_processing_manifest_from_s3(S3_BUCKET, manifest_key)
 
@@ -295,13 +389,13 @@ async def get_real_spots_data(
             logger.info(f"Loaded spot channels from manifest: {spot_channels_from_manifest}")
 
         # 2. Find and load the merged data
-        unmixed_spots_prefix = f"{DATA_PREFIX}/image_spot_spectral_unmixing/"
+        unmixed_spots_prefix = f"{data_prefix}/image_spot_spectral_unmixing/"
         
-        logger.info(f"Loading merged spots data for dataset: {DATA_PREFIX}")
+        logger.info(f"Loading merged spots data for dataset: {data_prefix}")
         try:
             df_polars = load_and_merge_spots_from_s3(
-                S3_BUCKET, 
-                DATA_PREFIX, 
+                S3_BUCKET,
+                data_prefix,
                 unmixed_spots_prefix,
                 valid_spots_only
             )
@@ -314,14 +408,16 @@ async def get_real_spots_data(
             df = df_polars.to_pandas()
             logger.info(f"Converted to pandas DataFrame shape: {df.shape}")
 
-            # Update cache
-            df_cache["data"] = df
-            df_cache["last_loaded"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            df_cache["target_key"] = f"{unmixed_spots_prefix}merged"
-            df_cache["processing_manifest"] = processing_manifest
-            df_cache["spot_channels_from_manifest"] = spot_channels_from_manifest
-            df_cache["sankey_data"] = None  # Clear cached Sankey data when new data is loaded
-            logger.info(f"Updated DataFrame cache at {df_cache['last_loaded']}")
+            # Update session cache
+            session_manager.update_session_cache(session_data["session_id"], {
+                "data": df,
+                "last_loaded": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "target_key": f"{unmixed_spots_prefix}merged",
+                "processing_manifest": processing_manifest,
+                "spot_channels_from_manifest": spot_channels_from_manifest,
+                "sankey_data": None  # Clear cached Sankey data when new data is loaded
+            })
+            logger.info(f"Updated DataFrame cache for session {session_data['username']}")
         except Exception as e:
             logger.error(f"Exception during DataFrame loading: {e}", exc_info=True)
             return JSONResponse(status_code=500, content={'error': 'Error loading spots data'})
@@ -330,7 +426,7 @@ async def get_real_spots_data(
     ratios_data = None
     summary_stats_data = None
 
-    related_files_prefix = f"{DATA_PREFIX}/image_spot_spectral_unmixing/"
+    related_files_prefix = f"{data_prefix}/image_spot_spectral_unmixing/"
     unmixed_target_key = find_unmixed_spots_file(
         S3_BUCKET, related_files_prefix, "unmixed_spots_*.pkl"
     )
@@ -416,7 +512,7 @@ async def get_real_spots_data(
         logger.warning("Could not create spot_details: required columns not found in DataFrame")
 
     # 7. Generate fused S3 paths
-    base_fuse_path = f"s3://{S3_BUCKET}/{DATA_PREFIX}/image_tile_fusing/fused"
+    base_fuse_path = f"s3://{S3_BUCKET}/{data_prefix}/image_tile_fusing/fused"
 
     if spot_channels_from_manifest:
         chs_for_fused_paths = spot_channels_from_manifest
@@ -470,7 +566,7 @@ async def get_real_spots_data(
                     sankey_data = calculate_sankey_data(df)  # Use full dataset, not sampled
             
             # Cache the calculated Sankey data
-            df_cache["sankey_data"] = sankey_data
+            session_manager.update_session_cache(session_data["session_id"], {"sankey_data": sankey_data})
             logger.info(f"Calculated and cached Sankey data: {len(sankey_data['nodes'])} nodes, "
                         f"{len(sankey_data['links'])} links")
         except Exception as e:
@@ -542,9 +638,17 @@ async def create_neuroglancer_link(request: Request):
         )
 
 @app.get("/api/datasets")
-async def list_datasets():
+async def list_datasets(request: Request):
     """List all available datasets in the local cache."""
     try:
+        # Session is optional for listing datasets, but we get current dataset if available
+        session_data = None
+        try:
+            session_data = require_session(request)
+            current_prefix = session_data["data_prefix"]
+        except HTTPException:
+            current_prefix = DEFAULT_DATA_PREFIX
+        
         cache_path = Path("/s3-cache") / S3_BUCKET
         datasets = []
         
@@ -563,7 +667,7 @@ async def list_datasets():
                         "name": dataset_dir.name,
                         "creation_date": creation_time.strftime("%Y-%m-%d %H:%M:%S"),
                         "has_data": has_data,
-                        "is_current": dataset_dir.name == DATA_PREFIX
+                        "is_current": dataset_dir.name == current_prefix
                     })
         
         # Sort by creation date (newest first)
@@ -676,8 +780,11 @@ async def download_dataset(request: Request):
 
 @app.post("/api/datasets/set-active")
 async def set_active_dataset(request: Request):
-    """Set the active dataset for the application."""
+    """Set the active dataset for the user's session."""
     try:
+        # Require session for setting active dataset
+        session_data = require_session(request)
+        
         data = await request.json()
         dataset_name = data.get("dataset_name")
         
@@ -689,18 +796,10 @@ async def set_active_dataset(request: Request):
         if not cache_path.exists():
             return JSONResponse(status_code=404, content={"error": "Dataset not found in local cache"})
         
-        # Update the global variable
-        global DATA_PREFIX
-        DATA_PREFIX = dataset_name
+        # Update the session's data prefix
+        session_manager.update_session_data_prefix(session_data["session_id"], dataset_name)
         
-        # Clear the cache to force reload with new dataset
-        df_cache["data"] = None
-        df_cache["last_loaded"] = None
-        df_cache["target_key"] = None
-        df_cache["processing_manifest"] = None
-        df_cache["spot_channels_from_manifest"] = None
-        
-        logger.info(f"Active dataset changed to: {dataset_name}")
+        logger.info(f"Active dataset changed to: {dataset_name} for user {session_data['username']}")
         
         return {
             "success": True,
@@ -708,15 +807,42 @@ async def set_active_dataset(request: Request):
             "message": "Active dataset updated successfully"
         }
     
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error setting active dataset: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.get("/")
+async def home(request: Request):
+    """Redirect to session page."""
+    return templates.TemplateResponse("session.html", {"request": request})
+
+
 @app.get("/unmixed-spots")
 async def unmixed_spots_page(request: Request):
-    logger.info("Unmixed spots page accessed")
-    return templates.TemplateResponse("unmixed_spots.html", {"request": request})
+    """Main application page - requires session."""
+    try:
+        # Check if session exists, if not redirect to session page
+        session_id = get_session_from_request(request)
+        if not session_id:
+            return templates.TemplateResponse("session.html", {"request": request})
+        
+        session_data = session_manager.get_session(session_id)
+        if not session_data:
+            return templates.TemplateResponse("session.html", {"request": request})
+        
+        logger.info(f"Unmixed spots page accessed by user {session_data['username']}")
+        return templates.TemplateResponse("unmixed_spots.html", {
+            "request": request,
+            "session_id": session_id,
+            "username": session_data['username']
+        })
+        
+    except Exception as e:
+        logger.error(f"Error accessing unmixed spots page: {e}", exc_info=True)
+        return templates.TemplateResponse("session.html", {"request": request})
+
 
 if __name__ == '__main__':
     uvicorn.run(app, host="0.0.0.0", port=8000)

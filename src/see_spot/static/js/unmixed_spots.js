@@ -1,4 +1,23 @@
 document.addEventListener('DOMContentLoaded', function () {
+    // Session management
+    const sessionId = localStorage.getItem('see_spot_session_id');
+    if (!sessionId) {
+        window.location.href = '/';
+        return;
+    }
+
+    // Helper function to make API requests with session ID
+    function fetchWithSession(url, options = {}) {
+        const defaultOptions = {
+            headers: {
+                'X-Session-ID': sessionId,
+                'Content-Type': 'application/json',
+                ...options.headers
+            }
+        };
+        return fetch(url, { ...defaultOptions, ...options });
+    }
+
     const chartDom = document.getElementById('main-chart');
     const spotsTableBody = document.getElementById('data-table-body');
     const spotsTable = document.getElementById('data-table');
@@ -95,7 +114,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
     // Dataset management functions
     function loadDatasetList() {
-        fetch('/api/datasets')
+        fetchWithSession('/api/datasets')
             .then(response => response.json())
             .then(data => {
                 if (data.datasets) {
@@ -217,11 +236,8 @@ document.addEventListener('DOMContentLoaded', function () {
         downloadDatasetBtn.disabled = true;
         downloadDatasetBtn.textContent = 'Downloading...';
         
-        fetch('/api/datasets/download', {
+        fetchWithSession('/api/datasets/download', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
             body: JSON.stringify({ dataset_name: datasetName })
         })
         .then(response => response.json())
@@ -256,11 +272,8 @@ document.addEventListener('DOMContentLoaded', function () {
         loadDatasetBtn.disabled = true;
         loadDatasetBtn.textContent = 'Loading...';
         
-        fetch('/api/datasets/set-active', {
+        fetchWithSession('/api/datasets/set-active', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
             body: JSON.stringify({ dataset_name: selectedDataset })
         })
         .then(response => response.json())
@@ -434,7 +447,7 @@ document.addEventListener('DOMContentLoaded', function () {
         const url = `/api/real_spots_data?sample_size=${sampleSize}${forceRefresh ? '&force_refresh=true' : ''}${validSpotsOnly ? '&valid_spots_only=true' : '&valid_spots_only=false'}`;
         console.log(`Fetching data with URL: ${url}`);
         
-        fetch(url)
+        fetchWithSession(url)
             .then(response => {
                 if (!response.ok) {
                     throw new Error(`HTTP error! Status: ${response.status}`);
@@ -1285,11 +1298,8 @@ document.addEventListener('DOMContentLoaded', function () {
         console.log("Creating neuroglancer link with data:", requestData);
         
         // Make the API request
-        fetch('/api/create-neuroglancer-link', {
+        fetchWithSession('/api/create-neuroglancer-link', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
             body: JSON.stringify(requestData)
         })
         .then(response => {

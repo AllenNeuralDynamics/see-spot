@@ -326,6 +326,18 @@
             <div style="font-size: 32px; font-weight: bold;">SeeSpot</div>
             <div style="font-size: 16px; color: #666;">by @mattjdavis</div>
         </div>
+        
+        {% if username %}
+        <div style="background: #f0f0f0; padding: 10px; border-radius: 5px; margin-bottom: 15px; text-align: center;">
+            <div style="font-size: 14px; color: #333;">
+                <strong>User:</strong> {{ username }}
+            </div>
+            <button onclick="logout()" style="background: #dc3545; color: white; border: none; padding: 4px 8px; border-radius: 3px; font-size: 12px; margin-top: 5px; cursor: pointer;">
+                Logout
+            </button>
+        </div>
+        {% endif %}
+        
         <div style="height: 20px;"></div>
         <h3>Hotkeys</h3>
         <div style="padding: 5px 10px; background-color: #f0f0f0; border-radius: 4px; margin-bottom: 15px;">
@@ -509,5 +521,14 @@
 
     <!-- Include your custom JavaScript -->
     <script src="/static/js/unmixed_spots.js"></script>
+    
+    <script>
+        function logout() {
+            if (confirm('Are you sure you want to logout?')) {
+                localStorage.removeItem('see_spot_session_id');
+                window.location.href = '/';
+            }
+        }
+    </script>
 </body>
 </html> 
