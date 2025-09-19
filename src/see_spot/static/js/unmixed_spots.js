@@ -66,7 +66,7 @@ document.addEventListener('DOMContentLoaded', function () {
         '638': '#9C27B0',    // Purple
         'ambiguous': '#9E9E9E', // Grey
         'none': '#607D8B',    // Blue Grey
-        'Removed': '#FF5722', // Deep Orange (distinct color for removed spots)
+        'Removed': 'rgba(0, 0, 0, 0.5)', // Black with 50% alpha for removed spots
         'default': '#2196F3'  // Blue (default)
     };
 
@@ -693,15 +693,21 @@ document.addEventListener('DOMContentLoaded', function () {
         });
         
         const series = sortedChannels.map(channel => ({
-            name: `${displayChanMode === 'mixed' ? 'Mixed' : 'Unmixed'}: ${channel}`,
+            name: channel, // Remove the Mixed/Unmixed prefix from individual labels
             type: 'scatter',
             data: seriesData[channel],
-            symbolSize: channel === 'Removed' ? 4 : 5, // Slightly smaller symbols for removed spots
-            // Add large dataset mode optimizations
-            large: true,
+            symbol: channel === 'Removed' ? 'triangle' : 'circle', // Use triangle symbol for removed spots 
+            symbolSize: channel === 'Removed' ? 8 : 5, // Larger size for removed symbols
+            // Add large dataset mode optimizations (but disable for Removed series to ensure visibility)
+            large: channel !== 'Removed',
             largeThreshold: LARGE_DATA_THRESHOLD,
             itemStyle: {
                 color: function(params) {
+                    // Special handling for Removed series - always black with 50% alpha
+                    if (channel === 'Removed') {
+                        return 'rgba(0, 0, 0, 0.5)'; // Black with 50% alpha for removed spots
+                    }
+                    
                     const isReassigned = params.data.value[9];
                     const isRemoved = params.data.value[10];
                     
@@ -791,30 +797,42 @@ document.addEventListener('DOMContentLoaded', function () {
         const seriesIndices = series.map((_, index) => index);
         
         option = {
-            title: {
-                text: `Intensity Scatter Plot: Channel ${xChan} vs ${yChan}`,
-                textStyle: {
+            // title: {
+            //     text: `Intensity Scatter Plot: Channel ${xChan} vs ${yChan}`,
+            //     textStyle: {
+            //         fontSize: 16,
+            //         fontWeight: 'bold'
+            //     }
+            // },
+            // Add a separate title element for the legend
+            graphic: [{
+                type: 'text',
+                right: 80, // Position it above the legend
+                top: 60,
+                style: {
+                    text: displayChanMode === 'mixed' ? 'Mixed' : 'Unmixed',
                     fontSize: 16,
-                    fontWeight: 'bold'
+                    fontWeight: 'bold',
+                    fill: '#333'
                 }
-            },
+            }],
             color: sortedChannels.map(chan => COLORS[chan] || COLORS.default), // Fixed colors for legend
             legend: {
                 type: 'scroll',
                 orient: 'vertical',
-                right: 10,
-                top: 50,
+                right: 45,
+                top: 85, // Move down to make room for graphic title
                 bottom: 50,
                 textStyle: {
                     fontSize: 14
                 },
                 selected: sortedChannels.reduce((acc, chan) => {
-                    acc[`${displayChanMode === 'mixed' ? 'Mixed' : 'Unmixed'}: ${chan}`] = true;
+                    acc[chan] = true; // Use channel name without prefix
                     return acc;
                 }, {})
             },
             grid: {
-                right: totalSliderWidth + sliderConfig.startRight + 100, // Make room for sliders and legend
+                right: totalSliderWidth + sliderConfig.startRight + 40, // Make room for sliders and legend
                 bottom: 70 // Still need some bottom space for axis labels
             },
             tooltip: {
@@ -947,7 +965,7 @@ document.addEventListener('DOMContentLoaded', function () {
                     },
                     ...sliderConfig,
                     handleStyle: {
-                        color: '#f44336'
+                        color: '#f83628ff'
                     },
                     inRange: {
                         opacity: 1
