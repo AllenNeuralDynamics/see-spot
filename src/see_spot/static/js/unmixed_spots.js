@@ -55,6 +55,7 @@ document.addEventListener('DOMContentLoaded', function () {
     let fusedS3Paths = {}; // Will store the fused S3 paths from the API
     let summaryStats = null; // Will store the summary stats from the API
     let ratiosMatrix = null; // Will store the ratios matrix from the API
+    let sankeyData = null; // Will store the sankey flow data from the API
     let selectedSpots = new Set();
     
     // Chart limits variables
@@ -472,6 +473,12 @@ document.addEventListener('DOMContentLoaded', function () {
                 if (data.ratios) {
                     ratiosMatrix = data.ratios;
                     console.log(`Received ratios matrix:`, ratiosMatrix);
+                }
+                
+                // Store sankey data if available
+                if (data.sankey_data) {
+                    sankeyData = data.sankey_data;
+                    console.log(`Received sankey data:`, sankeyData);
                 }
                 
                 // Process the data for chart
@@ -1530,10 +1537,11 @@ document.addEventListener('DOMContentLoaded', function () {
         ylimMax.value = Math.round(yMax);
     }
 
-    // Function to update the summary charts (bar chart and heatmap)
+    // Function to update the summary charts (bar chart, heatmap, and sankey)
     function updateSummaryCharts() {
         updateSummaryBarChart();
         updateSummaryHeatmap();
+        updateSankeyChart();
     }
     
     // Function to update the summary bar chart
@@ -1776,7 +1784,193 @@ document.addEventListener('DOMContentLoaded', function () {
         summaryHeatmap.resize();
     }
 
-    // Initialize the future chart with a placeholder
+    // Function to update the Sankey flow chart
+    function updateSankeyChart() {
+        if (!sankeyData) {
+            console.log("No Sankey data available from backend");
+            futureChart.setOption({
+                title: {
+                    text: 'Channel Flow Analysis\n(No data available)',
+                    left: 'center',
+                    top: 'top',
+                    textStyle: {
+                        color: '#999',
+                        fontStyle: 'italic',
+                        fontSize: 16
+                    }
+                }
+            });
+            return;
+        }
+
+        console.log("Updating Sankey chart with backend data");
+        console.log(`Processing ${sankeyData.total_spots} total spots from backend`);
+
+        // Prepare nodes for ECharts Sankey
+        const nodes = sankeyData.nodes.map(node => ({
+            name: node.name,
+            itemStyle: {
+                color: node.channel === 'Removed' ? 
+                    COLORS.Removed : 
+                    (COLORS[node.channel] || COLORS.default)
+            }
+        }));
+
+        // Prepare links for ECharts Sankey
+        const links = sankeyData.links.map(link => {
+            const isUnchanged = link.flow_type === 'unchanged';
+            const isRemoved = link.flow_type === 'removed';
+            
+            return {
+                source: link.source,
+                target: link.target,
+                value: link.value,
+                itemStyle: {
+                    color: isUnchanged ? 
+                        (COLORS[link.source.split(' ')[0]] || COLORS.default) : // Use original channel color for unchanged
+                        isRemoved ?
+                        'rgba(255, 87, 34, 0.6)' : // Orange-red for removed
+                        'rgba(150, 150, 150, 0.6)' // Gray for reassigned
+                },
+                lineStyle: {
+                    color: isUnchanged ? 
+                        (COLORS[link.source.split(' ')[0]] || COLORS.default) : // Use original channel color for unchanged
+                        isRemoved ?
+                        'rgba(255, 87, 34, 0.6)' : // Orange-red for removed
+                        'rgba(150, 150, 150, 0.6)' // Gray for reassigned
+                }
+            };
+        });
+
+        const sankeyOption = {
+            title: {
+                text: 'Channel Flow Analysis',
+                left: 'center',
+                top: 'top',
+                textStyle: {
+                    fontSize: 14,
+                    fontWeight: 'bold'
+                }
+            },
+            tooltip: {
+                trigger: 'item',
+                triggerOn: 'mousemove',
+                formatter: function(params) {
+                    if (params.dataType === 'edge') {
+                        // Find the corresponding link data from backend
+                        const linkData = sankeyData ? sankeyData.links.find(link => 
+                            link.source === params.data.source && link.target === params.data.target
+                        ) : null;
+                        
+                        if (linkData) {
+                            const [original] = linkData.source.split(' (');
+                            const [final] = linkData.target.split(' (');
+                            
+                            let flowType = '';
+                            if (linkData.flow_type === 'unchanged') {
+                                flowType = '<span style="color: #4CAF50;">✓ Unchanged</span>';
+                            } else if (linkData.flow_type === 'removed') {
+                                flowType = '<span style="color: #646464ff;">✗ Removed</span>';
+                            } else {
+                                flowType = '<span style="color: #ff0000ff;">↻ Reassigned</span>';
+                            }
+                            
+                            return `<div style="font-size: 13px;">
+                                    <div style="font-weight: bold; margin-bottom: 5px;">${flowType}</div>
+                                    <div>${original} → ${final}</div>
+                                    <div style="margin-top: 5px;">
+                                        <strong>${linkData.value.toLocaleString()}</strong> spots (${linkData.percentage}%)
+                                    </div>
+                                    </div>`;
+                        }
+                        
+                        // Fallback for old data structure
+                        const totalSpots = sankeyData ? sankeyData.total_spots : (allChartData ? allChartData.length : 1);
+                        const percentage = ((params.value / totalSpots) * 100).toFixed(1);
+                        const [original] = params.data.source.split(' (');
+                        const [final] = params.data.target.split(' (');
+                        
+                        let flowType = '';
+                        if (original === final) {
+                            flowType = '<span style="color: #4CAF50;">✓ Unchanged</span>';
+                        } else if (final === 'Removed') {
+                            flowType = '<span style="color: #636363ff;">✗ Removed</span>';
+                        } else {
+                            flowType = '<span style="color: #fc0a0aff;">↻ Reassigned</span>';
+                        }
+                        
+                        return `<div style="font-size: 13px;">
+                                <div style="font-weight: bold; margin-bottom: 5px;">${flowType}</div>
+                                <div>${original} → ${final}</div>
+                                <div style="margin-top: 5px;">
+                                    <strong>${params.value.toLocaleString()}</strong> spots (${percentage}%)
+                                </div>
+                                </div>`;
+                    } else {
+                        // Node tooltip
+                        const [channel, type] = params.name.split(' (');
+                        const isOriginal = type === 'Original)';
+                        
+                        // Calculate node total from backend Sankey links data
+                        let nodeCount = 0;
+                        if (isOriginal) {
+                            // Sum all flows starting from this original channel
+                            nodeCount = sankeyData.links
+                                .filter(link => link.source === params.name)
+                                .reduce((sum, link) => sum + link.value, 0);
+                        } else {
+                            // Sum all flows ending at this final channel
+                            nodeCount = sankeyData.links
+                                .filter(link => link.target === params.name)
+                                .reduce((sum, link) => sum + link.value, 0);
+                        }
+                        
+                        const percentage = ((nodeCount / sankeyData.total_spots) * 100).toFixed(1);
+                        return `<div style="font-size: 13px;">
+                                <div style="font-weight: bold;">${channel}</div>
+                                <div>${isOriginal ? 'Original' : 'Final'} channel</div>
+                                <div style="margin-top: 5px;">
+                                    <strong>${nodeCount.toLocaleString()}</strong> spots (${percentage}%)
+                                </div>
+                                </div>`;
+                    }
+                }
+            },
+            series: [{
+                type: 'sankey',
+                layout: 'none',
+                emphasis: {
+                    focus: 'adjacency'
+                },
+                data: nodes,
+                links: links,
+                orient: 'horizontal',
+                label: {
+                    position: 'outside',
+                    fontSize: 11,
+                    formatter: function(params) {
+                        const [channel] = params.name.split(' (');
+                        return channel;
+                    }
+                },
+                lineStyle: {
+                    curveness: 0.3
+                },
+                left: '5%',
+                right: '5%',
+                top: '15%',
+                bottom: '5%'
+            }]
+        };
+
+        futureChart.setOption(sankeyOption);
+        futureChart.resize();
+        
+        console.log(`Sankey chart created with ${nodes.length} nodes and ${links.length} links from backend data`);
+        console.log(`Backend used threshold of ${sankeyData.threshold_used} spots per flow`);
+    }
+
+    // Initialize the future chart with a placeholder until data loads
     futureChart.setOption({
         title: {
             text: 'Future Visualization \n (not implemented)',

@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import numpy as np
+import pandas as pd
 from datetime import datetime, timedelta
 import uvicorn
 import logging
@@ -46,7 +47,8 @@ df_cache = {
     "last_loaded": None,
     "target_key": None,
     "processing_manifest": None,
-    "spot_channels_from_manifest": None
+    "spot_channels_from_manifest": None,
+    "sankey_data": None  # Cache Sankey data to avoid recalculation
 }
 
 
@@ -56,10 +58,200 @@ def get_channel_pairs(df: pl.DataFrame) -> List[Tuple[str, str]]:
     channels = sorted([col.split('_')[1] for col in intensity_cols])
     return list(itertools.combinations(channels, 2))
 
+def calculate_sankey_data_from_polars(df_polars: pl.DataFrame) -> Dict[str, Any]:
+    """
+    Calculate Sankey diagram data directly from Polars DataFrame for maximum performance.
+    
+    Args:
+        df_polars: Polars DataFrame with all spots
+        
+    Returns:
+        Dictionary containing nodes and links for Sankey diagram
+    """
+    logger.info(f"Calculating Sankey data from {df_polars.height} total spots using native Polars")
+    
+    # Handle removed/none spots efficiently
+    df_processed = df_polars.with_columns([
+        pl.when(
+            (pl.col('unmixed_chan').is_null()) |
+            (pl.col('unmixed_chan') == 'none') |
+            (pl.col('unmixed_chan') == '')
+        ).then(pl.lit('Removed'))
+        .otherwise(pl.col('unmixed_chan'))
+        .alias('final_chan')
+    ])
+    
+    # Count flows efficiently using group_by
+    flow_counts = (
+        df_processed
+        .group_by(['chan', 'final_chan'])
+        .agg(pl.len().alias('count'))
+        .sort(['chan', 'final_chan'])
+    )
+    
+    # Get unique channels efficiently
+    original_channels = df_processed.select(pl.col('chan').unique().sort()).to_series().to_list()
+    final_channels = df_processed.select(pl.col('final_chan').unique().sort()).to_series().to_list()
+    
+    # Sort final channels to put 'Removed' last
+    final_channels = sorted(final_channels, key=lambda x: (x == 'Removed', x))
+    
+    logger.info(f"Found {len(original_channels)} original channels and {len(final_channels)} final channels")
+    
+    # Create nodes for Sankey diagram
+    nodes = []
+    
+    # Add original channel nodes (sources)
+    for chan in original_channels:
+        nodes.append({
+            "name": f"{chan} (Original)",
+            "category": "original",
+            "channel": chan
+        })
+    
+    # Add final channel nodes (targets)
+    for chan in final_channels:
+        nodes.append({
+            "name": f"{chan} (Final)",
+            "category": "final",
+            "channel": chan
+        })
+    
+    # Create links for Sankey diagram
+    links = []
+    total_spots = df_polars.height
+    min_threshold = max(5, int(total_spots * 0.001))  # At least 5 spots or 0.1% of data
+    
+    # Convert Polars result to Python for processing
+    flow_data = flow_counts.to_dicts()
+    
+    for flow in flow_data:
+        count = flow['count']
+        if count >= min_threshold:  # Only include significant flows
+            original = flow['chan']
+            final = flow['final_chan']
+            
+            flow_type = "unchanged" if original == final else ("removed" if final == "Removed" else "reassigned")
+            
+            links.append({
+                "source": f"{original} (Original)",
+                "target": f"{final} (Final)",
+                "value": count,
+                "flow_type": flow_type,
+                "percentage": round((count / total_spots) * 100, 2)
+            })
+    
+    logger.info(f"Created Sankey data: {len(nodes)} nodes, {len(links)} links (threshold: {min_threshold})")
+    
+    return {
+        "nodes": nodes,
+        "links": links,
+        "total_spots": total_spots,
+        "threshold_used": min_threshold
+    }
+
+
+def calculate_sankey_data(df: Any) -> Dict[str, Any]:
+    """
+    Calculate Sankey diagram data from the full dataset showing flows from original to final channels.
+    Optimized using Polars for better performance.
+    
+    Args:
+        df: Full pandas DataFrame with all spots
+        
+    Returns:
+        Dictionary containing nodes and links for Sankey diagram
+    """
+    logger.info(f"Calculating Sankey data from {len(df)} total spots using Polars optimization")
+    
+    # Convert to Polars for faster processing
+    df_polars = pl.from_pandas(df[['chan', 'unmixed_chan']].copy())
+    
+    # Handle removed/none spots efficiently
+    df_polars = df_polars.with_columns([
+        pl.when(
+            (pl.col('unmixed_chan').is_null()) |
+            (pl.col('unmixed_chan') == 'none') |
+            (pl.col('unmixed_chan') == '')
+        ).then(pl.lit('Removed'))
+        .otherwise(pl.col('unmixed_chan'))
+        .alias('final_chan')
+    ])
+    
+    # Count flows efficiently using group_by
+    flow_counts = (
+        df_polars
+        .group_by(['chan', 'final_chan'])
+        .agg(pl.len().alias('count'))
+        .sort(['chan', 'final_chan'])
+    )
+    
+    # Get unique channels
+    original_channels = df_polars.select(pl.col('chan').unique().sort()).to_series().to_list()
+    final_channels = df_polars.select(pl.col('final_chan').unique().sort()).to_series().to_list()
+    
+    # Sort final channels to put 'Removed' last
+    final_channels = sorted(final_channels, key=lambda x: (x == 'Removed', x))
+    
+    logger.info(f"Found {len(original_channels)} original channels and {len(final_channels)} final channels")
+    
+    # Create nodes for Sankey diagram
+    nodes = []
+    
+    # Add original channel nodes (sources)
+    for chan in original_channels:
+        nodes.append({
+            "name": f"{chan} (Original)",
+            "category": "original",
+            "channel": chan
+        })
+    
+    # Add final channel nodes (targets)
+    for chan in final_channels:
+        nodes.append({
+            "name": f"{chan} (Final)",
+            "category": "final",
+            "channel": chan
+        })
+    
+    # Create links for Sankey diagram
+    links = []
+    total_spots = len(df)
+    min_threshold = max(5, int(total_spots * 0.001))  # At least 5 spots or 0.1% of data
+    
+    # Convert Polars result to Python for processing
+    flow_data = flow_counts.to_dicts()
+    
+    for flow in flow_data:
+        count = flow['count']
+        if count >= min_threshold:  # Only include significant flows
+            original = flow['chan']
+            final = flow['final_chan']
+            
+            flow_type = "unchanged" if original == final else ("removed" if final == "Removed" else "reassigned")
+            
+            links.append({
+                "source": f"{original} (Original)",
+                "target": f"{final} (Final)",
+                "value": count,
+                "flow_type": flow_type,
+                "percentage": round((count / total_spots) * 100, 2)
+            })
+    
+    logger.info(f"Created Sankey data: {len(nodes)} nodes, {len(links)} links (threshold: {min_threshold})")
+    
+    return {
+        "nodes": nodes,
+        "links": links,
+        "total_spots": total_spots,
+        "threshold_used": min_threshold
+    }
+
+
 @app.get("/api/real_spots_data")
 async def get_real_spots_data(
-    sample_size: int = SAMPLE_SIZE, 
-    force_refresh: bool = False, 
+    sample_size: int = SAMPLE_SIZE,
+    force_refresh: bool = False,
     valid_spots_only: bool = False
 ):
     logger.info(f"Real spots data requested with sample size: {sample_size}, "
@@ -128,6 +320,7 @@ async def get_real_spots_data(
             df_cache["target_key"] = f"{unmixed_spots_prefix}merged"
             df_cache["processing_manifest"] = processing_manifest
             df_cache["spot_channels_from_manifest"] = spot_channels_from_manifest
+            df_cache["sankey_data"] = None  # Clear cached Sankey data when new data is loaded
             logger.info(f"Updated DataFrame cache at {df_cache['last_loaded']}")
         except Exception as e:
             logger.error(f"Exception during DataFrame loading: {e}", exc_info=True)
@@ -253,7 +446,37 @@ async def get_real_spots_data(
         ratios_json = ratios_data.tolist()
         logger.info("Converted ratios matrix to JSON serializable format")
 
-    # 10. Build the response
+    # 10. Calculate Sankey flow data from full dataset
+    sankey_data = None
+    
+    # Check if we can use cached Sankey data
+    if not force_refresh and df_cache.get("sankey_data") is not None:
+        logger.info("Using cached Sankey data")
+        sankey_data = df_cache["sankey_data"]
+    else:
+        try:
+            # Try to use the most efficient method available
+            if 'df_polars' in locals() and df_polars is not None:
+                logger.info("Using native Polars DataFrame for Sankey calculation")
+                sankey_data = calculate_sankey_data_from_polars(df_polars)
+            else:
+                logger.info("Converting pandas to Polars for Sankey calculation")
+                # For cached data, convert to Polars for faster processing
+                if 'chan' in df.columns and 'unmixed_chan' in df.columns:
+                    df_polars_temp = pl.from_pandas(df[['chan', 'unmixed_chan']].copy())
+                    sankey_data = calculate_sankey_data_from_polars(df_polars_temp)
+                else:
+                    logger.warning("Required columns not found, falling back to pandas method")
+                    sankey_data = calculate_sankey_data(df)  # Use full dataset, not sampled
+            
+            # Cache the calculated Sankey data
+            df_cache["sankey_data"] = sankey_data
+            logger.info(f"Calculated and cached Sankey data: {len(sankey_data['nodes'])} nodes, "
+                        f"{len(sankey_data['links'])} links")
+        except Exception as e:
+            logger.error(f"Error calculating Sankey data: {e}", exc_info=True)
+
+    # 11. Build the response
     response = {
         "channel_pairs": channel_pairs,
         "spots_data": data_for_frontend,
@@ -266,6 +489,9 @@ async def get_real_spots_data(
 
     if summary_stats_data:
         response["summary_stats"] = summary_stats_data
+
+    if sankey_data:
+        response["sankey_data"] = sankey_data
 
     return response
 
