@@ -20,7 +20,7 @@ cd /home/matt.davis/code/see-spot && source .venv/bin/activate && cd src && uvic
 ```
 
 ## Changelog
-+ 09-19-2025
++ v0.5.0 (09-19-2025)
   + backend downloads mixed + unmixed tables, merges and saves as .parquet (massive compression)
   + polars for dataframe manipulation (huge speedup)
   + optimized data types in tables, reduced memory demands
