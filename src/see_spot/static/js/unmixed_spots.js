@@ -77,6 +77,16 @@ document.addEventListener('DOMContentLoaded', function () {
     const limitsFixedButton = document.getElementById('limits_fixed');
     const limitsMinMaxButton = document.getElementById('limits_minmax');
     const limitsPercentileButton = document.getElementById('limits_percentile');
+    const rMinSlider = document.getElementById('r_min_slider');
+    const rMaxSlider = document.getElementById('r_max_slider');
+    const distMinSlider = document.getElementById('dist_min_slider');
+    const distMaxSlider = document.getElementById('dist_max_slider');
+    const rRangeDisplay = document.getElementById('r_range_display');
+    const distRangeDisplay = document.getElementById('dist_range_display');
+    const rRangeFill = document.getElementById('r_range_fill');
+    const distRangeFill = document.getElementById('dist_range_fill');
+    
+
     const summaryBarChartDom = document.getElementById('summary-bar-chart');
     const summaryHeatmapDom = document.getElementById('summary-heatmap');
     const futureChartDom = document.getElementById('future-chart');
@@ -103,6 +113,12 @@ document.addEventListener('DOMContentLoaded', function () {
     let ratiosMatrix = null; // Will store the ratios matrix from the API
     let sankeyData = null; // Will store the sankey flow data from the API
     let selectedSpots = new Set();
+    
+    // Sampling filter variables
+    let rMin = 0;
+    let rMax = 1;
+    let distMin = 0;
+    let distMax = 5;
     
     // Chart limits variables
     let chartLimitsMode = 'auto'; // 'auto', 'fixed', 'minmax', 'percentile'
@@ -459,6 +475,14 @@ document.addEventListener('DOMContentLoaded', function () {
         }
     }
     
+    // Initialize slider displays - read actual values from sliders
+    rMin = parseFloat(rMinSlider.value);
+    rMax = parseFloat(rMaxSlider.value);
+    distMin = parseFloat(distMinSlider.value);
+    distMax = parseFloat(distMaxSlider.value);
+    updateRangeDisplay(rMinSlider, rMaxSlider, rRangeDisplay, rRangeFill, rMin, rMax);
+    updateRangeDisplay(distMinSlider, distMaxSlider, distRangeDisplay, distRangeFill, distMin, distMax);
+    
     // Initial sample size note update
     updateSampleSizeNote(currentSampleSize);
     
@@ -471,7 +495,7 @@ document.addEventListener('DOMContentLoaded', function () {
     // Fetch data function
     function fetchData(sampleSize, forceRefresh = false) {
         const validSpotsOnly = validSpotToggle.checked;
-        const url = `/api/real_spots_data?sample_size=${sampleSize}${forceRefresh ? '&force_refresh=true' : ''}${validSpotsOnly ? '&valid_spots_only=true' : '&valid_spots_only=false'}`;
+        const url = `/api/real_spots_data?sample_size=${sampleSize}${forceRefresh ? '&force_refresh=true' : ''}${validSpotsOnly ? '&valid_spots_only=true' : '&valid_spots_only=false'}&r_min=${rMin}&r_max=${rMax}&dist_min=${distMin}&dist_max=${distMax}`;
         console.log(`Fetching data with URL: ${url}`);
         
         fetchWithSession(url)
@@ -524,6 +548,14 @@ document.addEventListener('DOMContentLoaded', function () {
                 // Process the data for chart
                 processDataAndRenderChart(spotsData);
                 
+                // Update slider ranges based on full dataset statistics
+                if (data.dataset_stats) {
+                    updateSliderRangesFromStats(data.dataset_stats);
+                } else {
+                    // Fallback: calculate from sample data if stats not available
+                    updateSliderRanges(spotsData);
+                }
+                
                 // Update summary charts if data is available
                 updateSummaryCharts();
                 
@@ -537,6 +569,114 @@ document.addEventListener('DOMContentLoaded', function () {
                 </div>`;
                 myChart.hideLoading();
             });
+    }
+
+    function updateSliderRanges(spotsData) {
+        // Calculate min/max values for r and dist from the actual data
+        let rMinActual = Infinity;
+        let rMaxActual = -Infinity;
+        let distMinActual = Infinity;
+        let distMaxActual = -Infinity;
+        
+        spotsData.forEach(spot => {
+            if (spot.r !== undefined && spot.r !== null) {
+                rMinActual = Math.min(rMinActual, spot.r);
+                rMaxActual = Math.max(rMaxActual, spot.r);
+            }
+            if (spot.dist !== undefined && spot.dist !== null) {
+                distMinActual = Math.min(distMinActual, spot.dist);
+                distMaxActual = Math.max(distMaxActual, spot.dist);
+            }
+        });
+        
+        // Update slider ranges if we have valid data
+        if (rMinActual !== Infinity && rMaxActual !== -Infinity) {
+            const rPadding = (rMaxActual - rMinActual) * 0.05; // 5% padding
+            rMinSlider.min = Math.max(0, rMinActual - rPadding).toFixed(1);
+            rMaxSlider.min = Math.max(0, rMinActual - rPadding).toFixed(1);
+            rMinSlider.max = (rMaxActual + rPadding).toFixed(1);
+            rMaxSlider.max = (rMaxActual + rPadding).toFixed(1);
+            
+            // Set initial values to data min/max if not already set by user
+            if (rMin === 0 && rMax === 1) {
+                rMin = Math.max(0, rMinActual - rPadding);
+                rMax = rMaxActual + rPadding;
+                rMinSlider.value = rMin.toFixed(1);
+                rMaxSlider.value = rMax.toFixed(1);
+                updateRangeDisplay(rMinSlider, rMaxSlider, rRangeDisplay, rRangeFill, rMin, rMax);
+            }
+        }
+        
+        if (distMinActual !== Infinity && distMaxActual !== -Infinity) {
+            const distPadding = (distMaxActual - distMinActual) * 0.05; // 5% padding
+            distMinSlider.min = Math.max(0, distMinActual - distPadding).toFixed(1);
+            distMaxSlider.min = Math.max(0, distMinActual - distPadding).toFixed(1);
+            distMinSlider.max = (distMaxActual + distPadding).toFixed(1);
+            distMaxSlider.max = (distMaxActual + distPadding).toFixed(1);
+            
+            // Set initial values to data min/max if not already set by user
+            if (distMin === 0 && distMax === 5) {
+                distMin = Math.max(0, distMinActual - distPadding);
+                distMax = distMaxActual + distPadding;
+                distMinSlider.value = distMin.toFixed(1);
+                distMaxSlider.value = distMax.toFixed(1);
+                updateRangeDisplay(distMinSlider, distMaxSlider, distRangeDisplay, distRangeFill, distMin, distMax);
+            }
+        }
+        
+        console.log(`Updated slider ranges - R: ${rMinSlider.min}-${rMinSlider.max}, Dist: ${distMinSlider.min}-${distMinSlider.max}`);
+    }
+
+    function updateSliderRangesFromStats(datasetStats) {
+        console.log('Updating slider ranges from dataset statistics:', datasetStats);
+        
+        // Update R slider range if stats available
+        if (datasetStats.r_min !== undefined && datasetStats.r_max !== undefined) {
+            const rRange = datasetStats.r_max - datasetStats.r_min;
+            const rPadding = rRange * 0.05; // 5% padding
+            const rMin_actual = Math.max(0, datasetStats.r_min - rPadding);
+            const rMax_actual = datasetStats.r_max + rPadding;
+            
+            rMinSlider.min = rMin_actual.toFixed(3);
+            rMaxSlider.min = rMin_actual.toFixed(3);
+            rMinSlider.max = rMax_actual.toFixed(3);
+            rMaxSlider.max = rMax_actual.toFixed(3);
+            
+            // Set initial values to data min/max if sliders are at default values
+            if (rMin === 0 && rMax === 1) {
+                rMin = rMin_actual;
+                rMax = rMax_actual;
+                rMinSlider.value = rMin.toFixed(3);
+                rMaxSlider.value = rMax.toFixed(3);
+                updateRangeDisplay(rMinSlider, rMaxSlider, rRangeDisplay, rRangeFill, rMin, rMax);
+            }
+            
+            console.log(`Updated R slider range: ${rMin_actual.toFixed(3)} - ${rMax_actual.toFixed(3)}`);
+        }
+        
+        // Update Dist slider range if stats available
+        if (datasetStats.dist_min !== undefined && datasetStats.dist_max !== undefined) {
+            const distRange = datasetStats.dist_max - datasetStats.dist_min;
+            const distPadding = distRange * 0.05; // 5% padding
+            const distMin_actual = Math.max(0, datasetStats.dist_min - distPadding);
+            const distMax_actual = datasetStats.dist_max + distPadding;
+            
+            distMinSlider.min = distMin_actual.toFixed(3);
+            distMaxSlider.min = distMin_actual.toFixed(3);
+            distMinSlider.max = distMax_actual.toFixed(3);
+            distMaxSlider.max = distMax_actual.toFixed(3);
+            
+            // Set initial values to data min/max if sliders are at default values
+            if (distMin === 0 && distMax === 5) {
+                distMin = distMin_actual;
+                distMax = distMax_actual;
+                distMinSlider.value = distMin.toFixed(3);
+                distMaxSlider.value = distMax.toFixed(3);
+                updateRangeDisplay(distMinSlider, distMaxSlider, distRangeDisplay, distRangeFill, distMin, distMax);
+            }
+            
+            console.log(`Updated Dist slider range: ${distMin_actual.toFixed(3)} - ${distMax_actual.toFixed(3)}`);
+        }
     }
 
     function processDataAndRenderChart(spotsData) {
@@ -994,58 +1134,58 @@ document.addEventListener('DOMContentLoaded', function () {
                     filterMode: 'empty'
                 }
             ],
-            visualMap: [
-                {
-                    // R-value filter
-                    right: sliderConfig.startRight,
-                    top: 'center',
-                    dimension: 2, // The 'r' value is at index 2 in each data point array
-                    min: 0,
-                    max: r99Percentile,
-                    precision: 2,
-                    text: ['R Value'],
-                    textStyle: {
-                        fontSize: 12
-                    },
-                    ...sliderConfig,
-                    handleStyle: {
-                        color: '#4285f4'
-                    },
-                    inRange: {
-                        opacity: 1
-                    },
-                    outOfRange: {
-                        opacity: 0.01
-                    },
-                    seriesIndex: seriesIndices, // Explicitly set which series this visualMap controls
-                    hoverLink: false // Disable hover highlight when using the slider
-                },
-                {
-                    // Distance filter
-                    right: sliderConfig.startRight + sliderConfig.width + sliderConfig.gap,
-                    top: 'center',
-                    dimension: 6, // The 'dist' value is at index 6 in each data point array
-                    min: 0,
-                    max: dist99Percentile,
-                    precision: 2,
-                    text: ['Distance'],
-                    textStyle: {
-                        fontSize: 12
-                    },
-                    ...sliderConfig,
-                    handleStyle: {
-                        color: '#f83628ff'
-                    },
-                    inRange: {
-                        opacity: 1
-                    },
-                    outOfRange: {
-                        opacity: 0.01
-                    },
-                    seriesIndex: seriesIndices, // Explicitly set which series this visualMap controls
-                    hoverLink: false // Disable hover highlight when using the slider
-                }
-            ],
+            // visualMap: [
+            //     {
+            //         // R-value filter
+            //         right: sliderConfig.startRight,
+            //         top: 'center',
+            //         dimension: 2, // The 'r' value is at index 2 in each data point array
+            //         min: 0,
+            //         max: r99Percentile,
+            //         precision: 2,
+            //         text: ['R Value'],
+            //         textStyle: {
+            //             fontSize: 12
+            //         },
+            //         ...sliderConfig,
+            //         handleStyle: {
+            //             color: '#4285f4'
+            //         },
+            //         inRange: {
+            //             opacity: 1
+            //         },
+            //         outOfRange: {
+            //             opacity: 0.01
+            //         },
+            //         seriesIndex: seriesIndices, // Explicitly set which series this visualMap controls
+            //         hoverLink: false // Disable hover highlight when using the slider
+            //     },
+            //     {
+            //         // Distance filter
+            //         right: sliderConfig.startRight + sliderConfig.width + sliderConfig.gap,
+            //         top: 'center',
+            //         dimension: 6, // The 'dist' value is at index 6 in each data point array
+            //         min: 0,
+            //         max: dist99Percentile,
+            //         precision: 2,
+            //         text: ['Distance'],
+            //         textStyle: {
+            //             fontSize: 12
+            //         },
+            //         ...sliderConfig,
+            //         handleStyle: {
+            //             color: '#f83628ff'
+            //         },
+            //         inRange: {
+            //             opacity: 1
+            //         },
+            //         outOfRange: {
+            //             opacity: 0.01
+            //         },
+            //         seriesIndex: seriesIndices, // Explicitly set which series this visualMap controls
+            //         hoverLink: false // Disable hover highlight when using the slider
+            //     }
+            // ],
             series: series
         };
 
@@ -1446,6 +1586,99 @@ document.addEventListener('DOMContentLoaded', function () {
         // Reload data with new filter setting
         fetchData(currentSampleSize, false);
     });
+
+    // Range slider helper functions
+    function updateRangeDisplay(minSlider, maxSlider, display, fill, minVar, maxVar) {
+        const min = parseFloat(minSlider.value);
+        const max = parseFloat(maxSlider.value);
+        const sliderMin = parseFloat(minSlider.min);
+        const sliderMax = parseFloat(minSlider.max);
+        
+        // Update display text
+        if (display) {
+            display.textContent = `${min.toFixed(1)} - ${max.toFixed(1)}`;
+        }
+        
+        // Update fill bar
+        if (fill) {
+            const minPercent = ((min - sliderMin) / (sliderMax - sliderMin)) * 100;
+            const maxPercent = ((max - sliderMin) / (sliderMax - sliderMin)) * 100;
+            
+            fill.style.left = minPercent + '%';
+            fill.style.width = (maxPercent - minPercent) + '%';
+        }
+        
+        return { min, max };
+    }
+
+    // Sampling filter slider event listeners
+    if (rMinSlider) {
+        rMinSlider.addEventListener('input', function() {
+            const newMin = parseFloat(this.value);
+            
+            // Ensure rMin doesn't exceed rMax
+            if (newMin > rMax) {
+                rMax = newMin;
+                rMaxSlider.value = rMax;
+            }
+            
+            rMin = newMin;
+            updateRangeDisplay(rMinSlider, rMaxSlider, rRangeDisplay, rRangeFill, rMin, rMax);
+        });
+    } else {
+        console.error('R min slider element not found');
+    }
+
+    if (rMaxSlider) {
+        rMaxSlider.addEventListener('input', function() {
+            const newMax = parseFloat(this.value);
+            
+            // Ensure rMax doesn't go below rMin
+            if (newMax < rMin) {
+                rMin = newMax;
+                rMinSlider.value = rMin;
+            }
+            
+            rMax = newMax;
+            updateRangeDisplay(rMinSlider, rMaxSlider, rRangeDisplay, rRangeFill, rMin, rMax);
+        });
+    } else {
+        console.error('R max slider element not found');
+    }
+
+    if (distMinSlider) {
+        distMinSlider.addEventListener('input', function() {
+            const newMin = parseFloat(this.value);
+            
+            // Ensure distMin doesn't exceed distMax
+            if (newMin > distMax) {
+                distMax = newMin;
+                distMaxSlider.value = distMax;
+            }
+            
+            distMin = newMin;
+            updateRangeDisplay(distMinSlider, distMaxSlider, distRangeDisplay, distRangeFill, distMin, distMax);
+        });
+    } else {
+        console.error('Dist min slider element not found');
+    }
+
+    if (distMaxSlider) {
+        distMaxSlider.addEventListener('input', function() {
+            const newMax = parseFloat(this.value);
+            
+            // Ensure distMax doesn't go below distMin
+            if (newMax < distMin) {
+                distMin = newMax;
+                distMinSlider.value = distMin;
+            }
+            
+            distMax = newMax;
+            updateRangeDisplay(distMinSlider, distMaxSlider, distRangeDisplay, distRangeFill, distMin, distMax);
+        });
+    } else {
+        console.error('Dist max slider element not found');
+    }
 
     // Chart limits event listeners
     function updateButtonStates() {

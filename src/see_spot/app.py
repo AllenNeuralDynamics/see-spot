@@ -340,7 +340,11 @@ async def get_real_spots_data(
     request: Request,
     sample_size: int = SAMPLE_SIZE,
     force_refresh: bool = False,
-    valid_spots_only: bool = False
+    valid_spots_only: bool = False,
+    r_min: Optional[float] = None,
+    r_max: Optional[float] = None,
+    dist_min: Optional[float] = None,
+    dist_max: Optional[float] = None
 ):
     # Get session data
     session_data = require_session(request)
@@ -449,19 +453,61 @@ async def get_real_spots_data(
                 summary_stats_data = summary_stats_df.to_dict(orient='records')
                 logger.info(f"Prepared {len(summary_stats_data)} summary stat records")
 
-    # 4. Subsample the data
-    if len(df) > sample_size:
-        logger.info(f"Subsampling DataFrame from {len(df)} to {sample_size} rows.")
-        plot_df = df.sample(n=sample_size, random_state=None).copy()
+    # 4. Calculate dataset statistics from full dataset for slider ranges
+    dataset_stats = {}
+    if 'r' in df.columns:
+        r_values = df['r'].dropna()
+        if len(r_values) > 0:
+            dataset_stats['r_min'] = float(r_values.min())
+            dataset_stats['r_max'] = float(r_values.max())
+            logger.info(f"Full dataset R range: {dataset_stats['r_min']:.3f} - {dataset_stats['r_max']:.3f}")
+    
+    if 'dist' in df.columns:
+        dist_values = df['dist'].dropna()
+        if len(dist_values) > 0:
+            dataset_stats['dist_min'] = float(dist_values.min())
+            dataset_stats['dist_max'] = float(dist_values.max())
+            logger.info(f"Full dataset Dist range: {dataset_stats['dist_min']:.3f} - {dataset_stats['dist_max']:.3f}")
+    
+    # 5. Apply sampling filters if specified
+    filtered_df = df.copy()
+    
+    # Apply r filter if specified
+    if r_min is not None and 'r' in filtered_df.columns:
+        filtered_df = filtered_df[filtered_df['r'] >= r_min]
+        logger.info(f"Applied r_min filter ({r_min}): {len(filtered_df)} spots remaining")
+    
+    if r_max is not None and 'r' in filtered_df.columns:
+        filtered_df = filtered_df[filtered_df['r'] <= r_max]
+        logger.info(f"Applied r_max filter ({r_max}): {len(filtered_df)} spots remaining")
+    
+    # Apply dist filter if specified
+    if dist_min is not None and 'dist' in filtered_df.columns:
+        filtered_df = filtered_df[filtered_df['dist'] >= dist_min]
+        logger.info(f"Applied dist_min filter ({dist_min}): {len(filtered_df)} spots remaining")
+    
+    if dist_max is not None and 'dist' in filtered_df.columns:
+        filtered_df = filtered_df[filtered_df['dist'] <= dist_max]
+        logger.info(f"Applied dist_max filter ({dist_max}): {len(filtered_df)} spots remaining")
+    
+    # Log filter summary
+    if any(param is not None for param in [r_min, r_max, dist_min, dist_max]):
+        logger.info(f"Filtered DataFrame from {len(df)} to {len(filtered_df)} spots "
+                    f"(r: {r_min}-{r_max}, dist: {dist_min}-{dist_max})")
+    
+    # 6. Subsample the filtered data
+    if len(filtered_df) > sample_size:
+        logger.info(f"Subsampling filtered DataFrame from {len(filtered_df)} to {sample_size} rows.")
+        plot_df = filtered_df.sample(n=sample_size, random_state=None).copy()
     else:
-        plot_df = df.copy()
-    logger.info(f"Plotting DataFrame shape: {plot_df.shape}")
+        plot_df = filtered_df.copy()
+    logger.info(f"Final plotting DataFrame shape: {plot_df.shape}")
 
     # Add 'reassigned' column indicating where chan != unmixed_chan
     plot_df['reassigned'] = plot_df['chan'] != plot_df['unmixed_chan']
     logger.info(f"Added 'reassigned' column. {plot_df['reassigned'].sum()} spots were reassigned.")
 
-    # 5. Determine available channels and pairs
+    # 7. Determine available channels and pairs
     try:
         if spot_channels_from_manifest:
             channels = sorted(spot_channels_from_manifest)
@@ -479,7 +525,7 @@ async def get_real_spots_data(
         logger.error(f"Error determining channel pairs: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={'error': 'Error processing channel data'})
 
-    # 6. Prepare data for JSON response
+    # 8. Prepare data for JSON response
     required_cols = ['spot_id', 'chan', 'r', 'dist', 'unmixed_chan', 'reassigned', 'unmixed_removed']
     intensity_cols = [f'chan_{c}_intensity' for pair in channel_pairs for c in pair]
     all_needed_cols = list(dict.fromkeys(required_cols + intensity_cols))
@@ -511,7 +557,7 @@ async def get_real_spots_data(
         spot_details = {}
         logger.warning("Could not create spot_details: required columns not found in DataFrame")
 
-    # 7. Generate fused S3 paths
+    # 9. Generate fused S3 paths
     base_fuse_path = f"s3://{S3_BUCKET}/{data_prefix}/image_tile_fusing/fused"
 
     if spot_channels_from_manifest:
@@ -528,7 +574,7 @@ async def get_real_spots_data(
     fused_s3_paths = [f"{base_fuse_path}/channel_{ch}.zarr" for ch in chs_for_fused_paths]
     logger.info(f"Generated fused S3 paths: {fused_s3_paths}")
 
-    # 8. Convert DataFrame to list of records (dictionaries)
+    # 10. Convert DataFrame to list of records (dictionaries)
     try:
         data_for_frontend = plot_df_subset.to_dict(orient='records')
         logger.info(f"Prepared {len(data_for_frontend)} records for frontend.")
@@ -536,13 +582,13 @@ async def get_real_spots_data(
         logger.error(f"Error converting DataFrame to dict: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={'error': 'Error formatting data'})
 
-    # 9. Prepare ratios data for JSON response
+    # 11. Prepare ratios data for JSON response
     ratios_json = None
     if ratios_data is not None:
         ratios_json = ratios_data.tolist()
         logger.info("Converted ratios matrix to JSON serializable format")
 
-    # 10. Calculate Sankey flow data from full dataset
+    # 12. Calculate Sankey flow data from full dataset
     sankey_data = None
     
     # Check if we can use cached Sankey data
@@ -572,12 +618,13 @@ async def get_real_spots_data(
         except Exception as e:
             logger.error(f"Error calculating Sankey data: {e}", exc_info=True)
 
-    # 11. Build the response
+    # 13. Build the response
     response = {
         "channel_pairs": channel_pairs,
         "spots_data": data_for_frontend,
         "spot_details": spot_details,
-        "fused_s3_paths": fused_s3_paths
+        "fused_s3_paths": fused_s3_paths,
+        "dataset_stats": dataset_stats
     }
 
     if ratios_json:
