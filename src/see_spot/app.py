@@ -19,7 +19,8 @@ from see_spot.s3_handler import s3_handler
 from see_spot.s3_utils import (
     find_unmixed_spots_file, find_related_files,
     load_ratios_from_s3, load_summary_stats_from_s3,
-    load_processing_manifest_from_s3, load_and_merge_spots_from_s3
+    load_processing_manifest_from_s3, load_and_merge_spots_from_s3,
+    find_processing_manifest
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -265,10 +266,14 @@ async def get_real_spots_data(
         processing_manifest = df_cache.get("processing_manifest")
         spot_channels_from_manifest = df_cache.get("spot_channels_from_manifest")
         if not processing_manifest or not spot_channels_from_manifest:
-            # Construct manifest path and load
-            manifest_key = f"{DATA_PREFIX}/derived/processing_manifest.json"
-            logger.info(f"Attempting to load processing manifest from: s3://{S3_BUCKET}/{manifest_key}")
-            processing_manifest = load_processing_manifest_from_s3(S3_BUCKET, manifest_key)
+            # Find manifest in either top level or derived folder
+            manifest_key = find_processing_manifest(S3_BUCKET, DATA_PREFIX)
+            if not manifest_key:
+                logger.error(f"Could not find processing_manifest.json for dataset {DATA_PREFIX}")
+                spot_channels_from_manifest = []
+            else:
+                logger.info(f"Attempting to load processing manifest from: s3://{S3_BUCKET}/{manifest_key}")
+                processing_manifest = load_processing_manifest_from_s3(S3_BUCKET, manifest_key)
             if processing_manifest and "spot_channels" in processing_manifest:
                 spot_channels_from_manifest = processing_manifest["spot_channels"]
                 df_cache["processing_manifest"] = processing_manifest
@@ -280,7 +285,11 @@ async def get_real_spots_data(
     else:
         # Need to load DataFrame from S3
         # 1. Load processing manifest to determine paths and channels
-        manifest_key = f"{DATA_PREFIX}/derived/processing_manifest.json"
+        manifest_key = find_processing_manifest(S3_BUCKET, DATA_PREFIX)
+        if not manifest_key:
+            logger.error(f"Could not find processing_manifest.json for dataset {DATA_PREFIX}.")
+            return JSONResponse(status_code=500, content={'error': 'Failed to find processing manifest'})
+        
         logger.info(f"Attempting to load processing manifest from: s3://{S3_BUCKET}/{manifest_key}")
         processing_manifest = load_processing_manifest_from_s3(S3_BUCKET, manifest_key)
 
@@ -586,21 +595,21 @@ async def download_dataset(request: Request):
             return JSONResponse(status_code=400, content={"error": "Dataset name is required"})
         
         # Check if dataset exists on S3 by looking for the processing manifest
-        manifest_key = f"{dataset_name}/derived/processing_manifest.json"
+        manifest_key = find_processing_manifest(S3_BUCKET, dataset_name)
         
-        logger.info(f"Checking if dataset exists: s3://{S3_BUCKET}/{manifest_key}")
-        
-        # Try to get the manifest to verify the dataset exists
-        manifest_content = s3_handler.get_object(key=manifest_key, bucket_name=S3_BUCKET)
-        
-        if manifest_content is None:
+        if not manifest_key:
             return JSONResponse(
                 status_code=404, 
                 content={
-                    "error": f"Dataset not found on S3",
-                    "checked_path": f"s3://{S3_BUCKET}/{manifest_key}"
+                    "error": f"Dataset not found on S3 - processing_manifest.json not found",
+                    "checked_paths": [
+                        f"s3://{S3_BUCKET}/{dataset_name}/processing_manifest.json",
+                        f"s3://{S3_BUCKET}/{dataset_name}/derived/processing_manifest.json"
+                    ]
                 }
             )
+        
+        logger.info(f"Found dataset manifest at: s3://{S3_BUCKET}/{manifest_key}")
         
         # Download the processing manifest first
         manifest_local_path = s3_handler.download_file(

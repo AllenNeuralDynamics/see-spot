@@ -14,6 +14,41 @@ import os
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+
+def find_processing_manifest(bucket: str, dataset_name: str) -> Optional[str]:
+    """
+    Find the processing_manifest.json file in either the top level or derived folder.
+    
+    Args:
+        bucket: S3 bucket name
+        dataset_name: Dataset name/prefix
+        
+    Returns:
+        Full S3 key to the manifest file, or None if not found
+    """
+    # Try both possible locations
+    possible_paths = [
+        f"{dataset_name}/processing_manifest.json",  # Top level
+        f"{dataset_name}/derived/processing_manifest.json"  # Derived folder
+    ]
+    
+    logger.info(f"Searching for processing_manifest.json in dataset '{dataset_name}'")
+    
+    for manifest_key in possible_paths:
+        logger.info(f"Checking: s3://{bucket}/{manifest_key}")
+        try:
+            # Try to get metadata (faster than downloading)
+            metadata = s3_handler.get_object_metadata(key=manifest_key, bucket_name=bucket)
+            if metadata is not None:
+                logger.info(f"Found processing manifest at: {manifest_key}")
+                return manifest_key
+        except Exception as e:
+            logger.debug(f"Manifest not found at {manifest_key}: {e}")
+            continue
+    
+    logger.warning(f"Could not find processing_manifest.json in any expected location for dataset '{dataset_name}'")
+    return None
+
 def optimize_dtypes(df: pl.DataFrame) -> pl.DataFrame:
     """Optimize DataFrame dtypes to reduce memory usage.
     
