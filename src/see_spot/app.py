@@ -49,7 +49,8 @@ df_cache = {
     "target_key": None,
     "processing_manifest": None,
     "spot_channels_from_manifest": None,
-    "sankey_data": None  # Cache Sankey data to avoid recalculation
+    "sankey_data": None,  # Cache Sankey data to avoid recalculation
+    "unmixed_spots_filename": None  # Store unmixed spots filename for neuroglancer logic
 }
 
 
@@ -344,6 +345,11 @@ async def get_real_spots_data(
         S3_BUCKET, related_files_prefix, "unmixed_spots_*.pkl"
     )
     
+    # Store the unmixed spots filename in cache for neuroglancer logic
+    if unmixed_target_key:
+        df_cache["unmixed_spots_filename"] = Path(unmixed_target_key).name
+        logger.info(f"Cached unmixed spots filename: {df_cache['unmixed_spots_filename']}")
+    
     if unmixed_target_key:
         related_files = find_related_files(S3_BUCKET, related_files_prefix, unmixed_target_key)
         logger.info(f"Searching for related files in '{related_files_prefix}'. Found: {related_files}")
@@ -518,29 +524,61 @@ async def create_neuroglancer_link(request: Request):
     cell_id = data.get("cell_id", 42)  # Default value if not provided
     spot_id = data.get("spot_id")
     annotation_color = data.get("annotation_color", "#FFFF00")
-    cross_section_scale = data.get("cross_section_scale", 1.0)
+    cross_section_scale = data.get("cross_section_scale", "0.135")
     
     # Input validation
-    if not fused_s3_paths or not position or not point_annotation or not spot_id:
+    if not position or not point_annotation or not spot_id:
         return JSONResponse(
             status_code=400,
-            content={"error": "Missing required parameters: fused_s3_paths, position, point_annotation, or spot_id"}
+            content={"error": "Missing required parameters: position, point_annotation, or spot_id"}
         )
     
     try:
         # Import the ng_utils module
         from see_spot import ng_utils
         
-        # Create the neuroglancer link
-        ng_link = ng_utils.create_link_no_upload(
-            fused_s3_paths,
-            annotation_color=annotation_color,
-            cross_section_scale=cross_section_scale,
-            cell_id=cell_id,
-            spot_id=spot_id,
-            position=position,
-            point_annotation=point_annotation
-        )
+        # Check if we should use the JSON-based method (when "merged" is in the pkl filename)
+        unmixed_spots_filename = df_cache.get("unmixed_spots_filename") or ""
+        use_json_method = "merged" in unmixed_spots_filename.lower()
+        
+        if use_json_method:
+            # Use the JSON-based method for merged datasets
+            logger.info(f"Using create_link_from_json method for merged dataset (filename: {unmixed_spots_filename})")
+            
+            # Construct the neuroglancer JSON path
+            ng_json_path = f"s3://{S3_BUCKET}/{DATA_PREFIX}/phase_correlation_stitching_neuroglancer.json"
+            logger.info(f"Neuroglancer JSON path: {ng_json_path}")
+            
+            # Create the neuroglancer link from JSON
+            ng_link = ng_utils.create_link_from_json(
+                ng_json_path=ng_json_path,
+                position=position,
+                spot_id=spot_id,
+                point_annotation=point_annotation,
+                annotation_color=annotation_color,
+                spacing=3.0,
+                cross_section_scale=cross_section_scale
+            )
+        else:
+            # Use the traditional method for non-merged datasets
+            logger.info(f"Using create_link_no_upload method for non-merged dataset (filename: {unmixed_spots_filename})")
+            
+            if not fused_s3_paths:
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": "Missing required parameter: fused_s3_paths (required for non-merged datasets)"}
+                )
+            
+            # Create the neuroglancer link
+            ng_link = ng_utils.create_link_no_upload(
+                fused_s3_paths,
+                annotation_color=annotation_color,
+                cross_section_scale=cross_section_scale,
+                cell_id=cell_id,
+                spot_id=spot_id,
+                position=position,
+                point_annotation=point_annotation
+            )
         
         return {"url": ng_link}
     except Exception as e:
@@ -631,7 +669,7 @@ async def download_dataset(request: Request):
                 content={
                     "error": "Spots data file not found",
                     "checked_path": f"s3://{S3_BUCKET}/{spots_key}unmixed_spots_*.pkl"
-                }
+                
             )
         
         # Try to create the merged parquet file by calling our new merge function

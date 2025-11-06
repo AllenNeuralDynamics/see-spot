@@ -239,6 +239,122 @@ def create_link_no_upload(fused_s3_path, resolution_zyx=None,
 
     return direct_url
 
+
+def create_link_from_json(ng_json_path, position, spot_id, point_annotation, 
+                          annotation_color="#FFFF00", spacing=3.0, 
+                          cross_section_scale= None, base_url="https://neuroglancer-demo.appspot.com"):
+    """
+    Create a Neuroglancer link from an existing JSON file with updated position and annotation.
+    
+    Parameters:
+    -----------
+    ng_json_path (str or Path): Path to the neuroglancer JSON file (can be local or S3 path)
+    position (list): New position coordinates [x, y, z, t]
+    spot_id (int or str): ID for the spot annotation
+    point_annotation (list): Point annotation coordinates [x, y, z, ...] 
+    annotation_color (str, optional): Hex color for the annotation. Default: "#FFFF00"
+    spacing (float, optional): Spacing for annotations in cross-section view. Default: 3.0
+    cross_section_scale (float, optional): Scale for cross-section view. If None, keeps existing value
+    base_url (str, optional): Base Neuroglancer URL. Default: "https://neuroglancer-demo.appspot.com"
+    
+    Returns:
+    --------
+    str: Direct Neuroglancer URL with updated state
+    """
+    import json
+    from pathlib import Path
+    
+    # Convert to Path object for easier handling
+    json_path = Path(ng_json_path) if not isinstance(ng_json_path, Path) else ng_json_path
+    
+    # Load the JSON file
+    try:
+        if str(json_path).startswith('s3://'):
+            # Handle S3 paths
+            import boto3
+            s3_path = str(json_path)[5:]  # Remove 's3://'
+            parts = s3_path.split('/')
+            bucket = parts[0]
+            key = '/'.join(parts[1:])
+            
+            s3_client = boto3.client('s3')
+            response = s3_client.get_object(Bucket=bucket, Key=key)
+            json_content = response['Body'].read().decode('utf-8')
+            state_dict = json.loads(json_content)
+            print(f"Loaded Neuroglancer state from S3: s3://{bucket}/{key}")
+        else:
+            # Handle local file paths
+            with open(json_path, 'r') as f:
+                state_dict = json.load(f)
+            print(f"Loaded Neuroglancer state from local file: {json_path}")
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Neuroglancer JSON file not found: {json_path}")
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON in file {json_path}: {e}")
+    except Exception as e:
+        raise Exception(f"Error loading Neuroglancer JSON from {json_path}: {e}")
+    
+    # Update position
+    state_dict["position"] = position
+    print(f"Updated position to: {position}")
+    
+    # Update cross-section scale if provided
+    if cross_section_scale is not None:
+        state_dict["crossSectionScale"] = cross_section_scale
+        print(f"Updated crossSectionScale to: {cross_section_scale}")
+    
+    # Find or create annotation layer
+    annotation_layer_found = False
+    
+    if "layers" in state_dict:
+        # Look for existing annotation layer
+        for i, layer in enumerate(state_dict["layers"]):
+            if layer.get("type") == "annotation":
+                # Update existing annotation layer
+                annotation = {
+                    "type": "point",
+                    "id": str(spot_id),
+                    "point": point_annotation,
+                }
+                
+                # Update the layer properties
+                state_dict["layers"][i]["name"] = f"Spot {spot_id}"
+                state_dict["layers"][i]["annotationColor"] = annotation_color
+                state_dict["layers"][i]["crossSectionAnnotationSpacing"] = spacing
+                state_dict["layers"][i]["annotations"] = [annotation]
+                
+                annotation_layer_found = True
+                print(f"Updated existing annotation layer with spot {spot_id}")
+                break
+        
+        # If no annotation layer exists, create one
+        if not annotation_layer_found:
+            annotation_layer = {
+                "type": "annotation",
+                "name": f"Spot {spot_id}",
+                "tab": "annotations",
+                "visible": True,
+                "annotationColor": annotation_color,
+                "crossSectionAnnotationSpacing": spacing,
+                "projectionAnnotationSpacing": 10,
+                "tool": "annotatePoint",
+                "annotations": [{
+                    "type": "point",
+                    "id": str(spot_id),
+                    "point": point_annotation,
+                }]
+            }
+            state_dict["layers"].append(annotation_layer)
+            print(f"Created new annotation layer with spot {spot_id}")
+    else:
+        print("Warning: No 'layers' found in Neuroglancer state")
+    
+    # Generate direct URL
+    direct_url = create_direct_neuroglancer_url(state_dict, base_url=base_url)
+    
+    return direct_url
+
+
 def read_zarr_resolution_boto(s3_path):
     """
     Read resolution from zarr using direct S3 access via boto3
