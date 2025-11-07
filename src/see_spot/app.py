@@ -5,6 +5,7 @@ from fastapi.templating import Jinja2Templates
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
+from see_spot import ng_utils
 import uvicorn
 import logging
 import os
@@ -50,6 +51,7 @@ df_cache = {
     "processing_manifest": None,
     "spot_channels_from_manifest": None,
     "sankey_data": None,  # Cache Sankey data to avoid recalculation
+    "unmixed_spots_filename": None  # Store unmixed spots filename for neuroglancer logic
     "unmixed_spots_filename": None  # Store unmixed spots filename for neuroglancer logic
 }
 
@@ -344,6 +346,11 @@ async def get_real_spots_data(
     unmixed_target_key = find_unmixed_spots_file(
         S3_BUCKET, related_files_prefix, "unmixed_spots_*.pkl"
     )
+    # Store the unmixed spots filename in cache for neuroglancer logic
+    if unmixed_target_key:
+        df_cache["unmixed_spots_filename"] = Path(unmixed_target_key).name
+        logger.info(f"Cached unmixed spots filename: {df_cache['unmixed_spots_filename']}")
+    
     
     # Store the unmixed spots filename in cache for neuroglancer logic
     if unmixed_target_key:
@@ -518,13 +525,12 @@ async def create_neuroglancer_link(request: Request):
     data = await request.json()
     
     # Extract the parameters from the request
-    fused_s3_paths = data.get("fused_s3_paths")
+    cross_section_scale = data.get("cross_section_scale", "0.135")
+    spot_id = data.get("spot_id")
     position = data.get("position")
     point_annotation = data.get("point_annotation")
-    cell_id = data.get("cell_id", 42)  # Default value if not provided
-    spot_id = data.get("spot_id")
-    annotation_color = data.get("annotation_color", "#FFFF00")
-    cross_section_scale = data.get("cross_section_scale", "0.135")
+    if not position or not point_annotation or not spot_id:
+        annotation_color = data.get("annotation_color", "#FFFF00")
     
     # Input validation
     if not position or not point_annotation or not spot_id:
@@ -532,37 +538,34 @@ async def create_neuroglancer_link(request: Request):
             status_code=400,
             content={"error": "Missing required parameters: position, point_annotation, or spot_id"}
         )
-    
-    try:
-        # Import the ng_utils module
-        from see_spot import ng_utils
-        
-        # Check if we should use the JSON-based method (when "merged" is in the pkl filename)
-        unmixed_spots_filename = df_cache.get("unmixed_spots_filename") or ""
-        use_json_method = "merged" in unmixed_spots_filename.lower()
-        
+    # Check if we should use the JSON-based method (when "merged" is in the pkl filename)
+    unmixed_spots_filename = df_cache.get("unmixed_spots_filename") or ""
+    use_json_method = "merged" in unmixed_spots_filename.lower()
+    try: 
         if use_json_method:
-            # Use the JSON-based method for merged datasets
-            logger.info(f"Using create_link_from_json method for merged dataset (filename: {unmixed_spots_filename})")
-            
-            # Construct the neuroglancer JSON path
-            ng_json_path = f"s3://{S3_BUCKET}/{DATA_PREFIX}/phase_correlation_stitching_neuroglancer.json"
-            logger.info(f"Neuroglancer JSON path: {ng_json_path}")
-            
-            # Create the neuroglancer link from JSON
-            ng_link = ng_utils.create_link_from_json(
-                ng_json_path=ng_json_path,
-                position=position,
-                spot_id=spot_id,
-                point_annotation=point_annotation,
-                annotation_color=annotation_color,
-                spacing=3.0,
-                cross_section_scale=cross_section_scale
-            )
+                # Use the JSON-based method for merged datasets
+                logger.info(f"Using create_link_from_json method for merged dataset (filename: {unmixed_spots_filename})")
+                
+                # Construct the neuroglancer JSON path
+                ng_json_path = f"s3://{S3_BUCKET}/{DATA_PREFIX}/phase_correlation_stitching_neuroglancer.json"
+                logger.info(f"Neuroglancer JSON path: {ng_json_path}")
+                
+                # Create the neuroglancer link from JSON
+                ng_link = ng_utils.create_link_from_json(
+                    ng_json_path=ng_json_path,
+                    position=position,
+                    spot_id=spot_id,
+                    point_annotation=point_annotation,
+                    annotation_color=annotation_color,
+                    spacing=3.0,
+                    cross_section_scale=cross_section_scale
+                )
         else:
             # Use the traditional method for non-merged datasets
             logger.info(f"Using create_link_no_upload method for non-merged dataset (filename: {unmixed_spots_filename})")
-            
+            fused_s3_paths = data.get("fused_s3_paths")
+            cell_id = data.get("cell_id", 42)  # Default value if not provided
+
             if not fused_s3_paths:
                 return JSONResponse(
                     status_code=400,
@@ -579,7 +582,7 @@ async def create_neuroglancer_link(request: Request):
                 position=position,
                 point_annotation=point_annotation
             )
-        
+            
         return {"url": ng_link}
     except Exception as e:
         logger.error(f"Error creating neuroglancer link: {str(e)}")
