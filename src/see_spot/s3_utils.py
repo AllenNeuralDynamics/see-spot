@@ -210,7 +210,8 @@ def get_base_pattern_from_unmixed(unmixed_key: str) -> str:
     # Extract pattern like R3 from unmixed_spots_R3_minDist_3.pkl
     parts = filename.split("_")
     for part in parts:
-        if part.startswith("R") and part[1:].isdigit():
+        # add support for R-1 (default round for datasets without metadata)
+        if part.startswith("R") and (part[1:].isdigit() or part[1:] == '-1'): 
             return part
     return "R3"  # Default fallback
 
