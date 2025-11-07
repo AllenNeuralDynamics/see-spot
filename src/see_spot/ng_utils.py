@@ -255,7 +255,7 @@ def create_link_from_json(
     position,
     spot_id,
     point_annotation,
-    annotation_color="#FFFF00",
+    annotation_color="#FF0000",
     spacing=3.0,
     cross_section_scale=None,
     base_url="https://neuroglancer-demo.appspot.com",

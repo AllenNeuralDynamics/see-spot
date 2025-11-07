@@ -528,8 +528,7 @@ async def create_neuroglancer_link(request: Request):
     spot_id = data.get("spot_id")
     position = data.get("position")
     point_annotation = data.get("point_annotation")
-    if not position or not point_annotation or not spot_id:
-        annotation_color = data.get("annotation_color", "#FFFF00")
+    annotation_color = data.get("annotation_color", "#FFFF00")
     
     # Input validation
     if not position or not point_annotation or not spot_id:
