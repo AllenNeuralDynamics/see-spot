@@ -163,7 +163,7 @@ def merge_spots_tables(spots_mixed, spots_unmixed):
 def find_mixed_spots_file(
     bucket: str, prefix: str, pattern: str
 ) -> Optional[str]:
-    """Finds the first mixed spots file matching the pattern within the prefix."""
+    """Finds the first mixed spots file matching the pattern within the prefix (top level only, non-recursive)."""
     logger.info(
         f"Searching for mixed spots pattern '{pattern}' in bucket '{bucket}' with prefix '{prefix}'..."
     )
@@ -178,6 +178,13 @@ def find_mixed_spots_file(
 
         found_files = []
         for key in objects:
+            # Skip objects in subdirectories - only check files at the top level
+            # Remove the prefix and check if there are any additional slashes
+            relative_path = key[len(prefix):] if key.startswith(prefix) else key
+            # If there's a slash in the relative path, it's in a subdirectory
+            if '/' in relative_path.lstrip('/'):
+                continue
+            
             # Use Pathlib to easily get the filename part of the key
             filename = Path(key).name
             if fnmatch.fnmatch(filename, pattern):
@@ -372,7 +379,7 @@ def load_and_merge_spots_from_s3(
 def find_unmixed_spots_file(
     bucket: str, prefix: str, pattern: str
 ) -> Optional[str]:
-    """Finds the first S3 object key matching the pattern within the prefix."""
+    """Finds the first S3 object key matching the pattern within the prefix (top level only, non-recursive)."""
     logger.info(
         f"Searching for pattern '{pattern}' in bucket '{bucket}' with prefix '{prefix}'..."
     )
@@ -387,6 +394,13 @@ def find_unmixed_spots_file(
 
         found_files = []
         for key in objects:
+            # Skip objects in subdirectories - only check files at the top level
+            # Remove the prefix and check if there are any additional slashes
+            relative_path = key[len(prefix):] if key.startswith(prefix) else key
+            # If there's a slash in the relative path, it's in a subdirectory
+            if '/' in relative_path.lstrip('/'):
+                continue
+            
             # Use Pathlib to easily get the filename part of the key
             filename = Path(key).name
             if fnmatch.fnmatch(filename, pattern):
