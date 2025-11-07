@@ -537,8 +537,10 @@ async def create_neuroglancer_link(request: Request):
             content={"error": "Missing required parameters: position, point_annotation, or spot_id"}
         )
     # Check if we should use the JSON-based method (when "merged" is in the pkl filename)
-    unmixed_spots_filename = df_cache.get("unmixed_spots_filename") or ""
+    unmixed_spots_filename = df_cache.get("unmixed_spots_filename", "no filename found")
+    logger.info(f"Unmixed spots filename: {unmixed_spots_filename}")
     use_json_method = "merged" in unmixed_spots_filename.lower()
+    logger.info(f"Using JSON-based method: {use_json_method}")
     try: 
         if use_json_method:
                 # Use the JSON-based method for merged datasets
