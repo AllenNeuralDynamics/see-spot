@@ -521,7 +521,17 @@ async def get_real_spots_data(
 async def create_neuroglancer_link(request: Request):
     """Creates a neuroglancer link with a point annotation at specified coordinates."""
     # Parse the JSON data from the request
+    """const requestData = {
+            fused_s3_paths: fusedS3Paths,
+            position: [details.x, details.y, details.z, 0],
+            point_annotation: [details.x, details.y, details.z, 0.5, 0],
+            cell_id: details.cell_id || 42,
+            spot_id: spotId,
+            annotation_color: "#FFFF00",
+            cross_section_scale: 0.2
+        };"""
     data = await request.json()
+    
     
     # Extract the parameters from the request
     cross_section_scale = data.get("cross_section_scale", "0.135")
@@ -539,28 +549,29 @@ async def create_neuroglancer_link(request: Request):
     # Check if we should use the JSON-based method (when "merged" is in the pkl filename)
     unmixed_spots_filename = df_cache.get("unmixed_spots_filename", "no filename found")
     logger.info(f"Unmixed spots filename: {unmixed_spots_filename}")
-    use_json_method = "merged" in unmixed_spots_filename.lower()
-    logger.info(f"Using JSON-based method: {use_json_method}")
+    # use_json_method = "merged" in unmixed_spots_filename.lower()
+    # logger.info(f"Using JSON-based method: {use_json_method}")
     try: 
-        if use_json_method:
-                # Use the JSON-based method for merged datasets
-                logger.info(f"Using create_link_from_json method for merged dataset (filename: {unmixed_spots_filename})")
-                
-                # Construct the neuroglancer JSON path
-                ng_json_path = f"s3://{S3_BUCKET}/{DATA_PREFIX}/phase_correlation_stitching_neuroglancer.json"
-                logger.info(f"Neuroglancer JSON path: {ng_json_path}")
-                
-                # Create the neuroglancer link from JSON
-                ng_link = ng_utils.create_link_from_json(
-                    ng_json_path=ng_json_path,
-                    position=position,
-                    spot_id=spot_id,
-                    point_annotation=point_annotation,
-                    annotation_color=annotation_color,
-                    spacing=3.0,
-                    cross_section_scale=cross_section_scale
-                )
-        else:
+        # if use_json_method:
+        try: 
+            # Use the JSON-based method for merged datasets
+            logger.info(f"Using create_link_from_json method for merged dataset (filename: {unmixed_spots_filename})")
+            
+            # Construct the neuroglancer JSON path
+            ng_json_path = f"s3://{S3_BUCKET}/{DATA_PREFIX}/phase_correlation_stitching_neuroglancer.json"
+            logger.info(f"Neuroglancer JSON path: {ng_json_path}")
+            
+            # Create the neuroglancer link from JSON
+            ng_link = ng_utils.create_link_from_json(
+                ng_json_path=ng_json_path,
+                position=position,
+                spot_id=spot_id,
+                point_annotation=point_annotation,
+                annotation_color=annotation_color,
+                spacing=3.0,
+                cross_section_scale=cross_section_scale
+            )
+        except Exception as e:
             # Use the traditional method for non-merged datasets
             logger.info(f"Using create_link_no_upload method for non-merged dataset (filename: {unmixed_spots_filename})")
             fused_s3_paths = data.get("fused_s3_paths")
