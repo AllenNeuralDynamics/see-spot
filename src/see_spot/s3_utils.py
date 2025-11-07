@@ -276,7 +276,7 @@ def load_and_merge_spots_from_s3(
 
     # 2. Find mixed spots file based on pattern from unmixed file
     base_pattern = get_base_pattern_from_unmixed(unmixed_key)
-    mixed_pattern = f"mixed_spots_{base_pattern}.pkl"
+    mixed_pattern = f"mixed_spots_{base_pattern}*.pkl"
     mixed_key = find_mixed_spots_file(
         bucket, unmixed_spots_prefix, mixed_pattern
     )
