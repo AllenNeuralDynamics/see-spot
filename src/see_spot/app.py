@@ -52,7 +52,6 @@ df_cache = {
     "spot_channels_from_manifest": None,
     "sankey_data": None,  # Cache Sankey data to avoid recalculation
     "unmixed_spots_filename": None  # Store unmixed spots filename for neuroglancer logic
-    "unmixed_spots_filename": None  # Store unmixed spots filename for neuroglancer logic
 }
 
 
@@ -671,7 +670,7 @@ async def download_dataset(request: Request):
                 status_code=404, 
                 content={
                     "error": "Spots data file not found",
-                    "checked_path": f"s3://{S3_BUCKET}/{spots_key}unmixed_spots_*.pkl"
+                    "checked_path": f"s3://{S3_BUCKET}/{spots_key}unmixed_spots_*.pkl"}
                 
             )
         
