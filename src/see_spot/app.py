@@ -2,14 +2,11 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-import numpy as np
-import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 from see_spot import ng_utils
 import uvicorn
 import logging
 import os
-import json
 from pathlib import Path
 import polars as pl
 import itertools
@@ -17,6 +14,7 @@ from typing import List, Tuple, Dict, Any
 
 # Import your modules
 from see_spot.s3_handler import s3_handler
+from see_spot.logging_config import setup_logging
 from see_spot.s3_utils import (
     find_unmixed_spots_file, find_related_files,
     load_ratios_from_s3, load_summary_stats_from_s3,
@@ -24,7 +22,8 @@ from see_spot.s3_utils import (
     find_processing_manifest
 )
 
-logging.basicConfig(level=logging.INFO)
+# Initialize logging using central utility (idempotent)
+setup_logging(os.getenv("SEE_SPOT_LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
@@ -60,6 +59,7 @@ def get_channel_pairs(df: pl.DataFrame) -> List[Tuple[str, str]]:
     intensity_cols = [col for col in df.columns if col.endswith('_intensity')]
     channels = sorted([col.split('_')[1] for col in intensity_cols])
     return list(itertools.combinations(channels, 2))
+
 
 def calculate_sankey_data_from_polars(df_polars: pl.DataFrame) -> Dict[str, Any]:
     """
@@ -421,17 +421,35 @@ async def get_real_spots_data(
     detail_cols = ['spot_id', 'cell_id', 'round', 'z', 'y', 'x']
     available_detail_cols = [col for col in detail_cols if col in plot_df.columns]
     
-    if len(available_detail_cols) > 1:
-        logger.info(f"Creating spot_details with columns: {available_detail_cols}")
+    # Normalize spot_id to int if float to avoid '63.0' style keys
+    if 'spot_id' in plot_df.columns and plot_df['spot_id'].dtype.kind == 'f':
+        if plot_df['spot_id'].isna().any():
+            logger.warning("spot_id column has NaNs before coercion; keys may be inconsistent")
+        logger.info("Coercing float spot_id column to int64 for clean spot_details keys")
+        try:
+            plot_df['spot_id'] = plot_df['spot_id'].astype('int64')
+        except Exception as e:
+            logger.error(f"Failed coercing spot_id to int64: {e}")
+
+    if len(available_detail_cols) >= 1:
+        logger.info(f"Building spot_details from columns: {available_detail_cols}")
         spot_details_df = plot_df[available_detail_cols].copy()
-        
-        spot_details = {
-            str(row['spot_id']): {
-                col: row[col] for col in available_detail_cols if col != 'spot_id'
+        # Ensure spot_id is present
+        if 'spot_id' not in spot_details_df.columns:
+            logger.warning("spot_id column missing; cannot build spot_details")
+            spot_details = {}
+        else:
+            spot_details = {
+                str(int(row['spot_id'])): {
+                    col: row[col] for col in available_detail_cols if col != 'spot_id'
+                }
+                for _, row in spot_details_df.iterrows()
             }
-            for _, row in spot_details_df.iterrows()
-        }
-        logger.info(f"Created spot_details dictionary with {len(spot_details)} entries")
+            logger.info(
+                "spot_details built: %d entries | sample keys: %s",
+                len(spot_details),
+                list(spot_details.keys())[:5]
+            )
     else:
         spot_details = {}
         logger.warning("Could not create spot_details: required columns not found in DataFrame")
@@ -531,8 +549,6 @@ async def create_neuroglancer_link(request: Request):
             cross_section_scale: 0.2
         };"""
     data = await request.json()
-    
-    
     # Extract the parameters from the request
     cross_section_scale = data.get("cross_section_scale", "0.135")
     spot_id = data.get("spot_id")
@@ -546,44 +562,100 @@ async def create_neuroglancer_link(request: Request):
             status_code=400,
             content={"error": "Missing required parameters: position, point_annotation, or spot_id"}
         )
-    # Check if we should use the JSON-based method (when "merged" is in the pkl filename)
-    unmixed_spots_filename = df_cache.get("unmixed_spots_filename", "no filename found")
-    logger.info(f"Unmixed spots filename: {unmixed_spots_filename}")
-    # use_json_method = "merged" in unmixed_spots_filename.lower()
-    # logger.info(f"Using JSON-based method: {use_json_method}")
-    try: 
-        # if use_json_method:
-        try: 
-            # Use the JSON-based method for merged datasets
-            logger.info(f"Using create_link_from_json method for merged dataset (filename: {unmixed_spots_filename})")
-            
-            # Construct the neuroglancer JSON path
-            ng_json_path = f"s3://{S3_BUCKET}/{DATA_PREFIX}/phase_correlation_stitching_neuroglancer.json"
-            logger.info(f"Neuroglancer JSON path: {ng_json_path}")
-            
-            # Create the neuroglancer link from JSON
-            ng_link = ng_utils.create_link_from_json(
-                ng_json_path=ng_json_path,
-                position=position,
-                spot_id=spot_id,
-                point_annotation=point_annotation,
-                annotation_color=annotation_color,
-                spacing=3.0,
-                cross_section_scale=cross_section_scale
-            )
-        except Exception as e:
-            # Use the traditional method for non-merged datasets
-            logger.info(f"Using create_link_no_upload method for non-merged dataset (filename: {unmixed_spots_filename})")
-            fused_s3_paths = data.get("fused_s3_paths")
-            cell_id = data.get("cell_id", 42)  # Default value if not provided
+    # Enhanced logging & dynamic JSON path logic
+    unmixed_spots_filename = df_cache.get("unmixed_spots_filename", "<unknown>")
+    logger.info(
+        "Neuroglancer link request | spot_id=%s | unmixed_spots_file=%s | json_override_env=%s",
+        spot_id,
+        unmixed_spots_filename,
+        os.getenv("SEE_SPOT_NG_JSON_NAME", "<unset>")
+    )
+    logger.debug(
+        "Raw request data keys: %s", ",".join(sorted(data.keys()))
+    )
+    logger.debug(
+        "Position=%s point_annotation=%s annotation_color=%s cross_section_scale=%s",
+        position,
+        point_annotation,
+        annotation_color,
+        cross_section_scale,
+    )
 
+    # Determine JSON file name (env override allowed) and full S3 path
+    ng_json_filename = os.getenv(
+        "SEE_SPOT_NG_JSON_NAME", "phase_correlation_stitching_neuroglancer.json"
+    )
+    ng_json_path = f"s3://{S3_BUCKET}/{DATA_PREFIX}/{ng_json_filename}"
+    s3_key_for_json = f"{DATA_PREFIX}/{ng_json_filename}"  # key relative to bucket
+    logger.info("Constructed Neuroglancer JSON path: %s", ng_json_path)
+
+    # Check existence of JSON on S3 (metadata only) for better diagnostics
+    json_metadata = None
+    try:
+        json_metadata = s3_handler.get_object_metadata(
+            s3_key_for_json, bucket_name=S3_BUCKET
+        )
+        if json_metadata:
+            logger.info(
+                "Neuroglancer JSON found on S3 (ContentLength=%s LastModified=%s)",
+                json_metadata.get("ContentLength"),
+                json_metadata.get("LastModified"),
+            )
+        else:
+            logger.warning(
+                "Neuroglancer JSON NOT found on S3: s3://%s/%s", S3_BUCKET, s3_key_for_json
+            )
+    except Exception as meta_err:
+        logger.error(
+            "Error checking Neuroglancer JSON metadata: %s", meta_err, exc_info=True
+        )
+
+    # Decide strategy: prefer JSON-based method when file exists; fall back otherwise
+    use_json_method = json_metadata is not None or "merged" in unmixed_spots_filename.lower()
+    logger.info("Use JSON method decision: %s", use_json_method)
+
+    try:
+        if use_json_method:
+            logger.info(
+                "Attempting create_link_from_json(spot_id=%s, path=%s)",
+                spot_id,
+                ng_json_path,
+            )
+            try:
+                ng_link = ng_utils.create_link_from_json(
+                    ng_json_path=ng_json_path,
+                    position=position,
+                    spot_id=spot_id,
+                    point_annotation=point_annotation,
+                    annotation_color=annotation_color,
+                    spacing=3.0,
+                    cross_section_scale=cross_section_scale,
+                )
+                logger.info("Successfully built Neuroglancer link from JSON")
+            except Exception as json_err:
+                logger.error(
+                    "JSON link creation failed: %s | Falling back to direct method",
+                    json_err,
+                    exc_info=True,
+                )
+                use_json_method = False  # force fallback
+
+        if not use_json_method:
+            logger.info("Falling back to create_link_no_upload() pathway")
+            fused_s3_paths = data.get("fused_s3_paths")
+            cell_id = data.get("cell_id", 42)
             if not fused_s3_paths:
+                logger.error(
+                    "Missing fused_s3_paths for fallback method; cannot proceed"
+                )
                 return JSONResponse(
                     status_code=400,
-                    content={"error": "Missing required parameter: fused_s3_paths (required for non-merged datasets)"}
+                    content={
+                        "error": "Missing required parameter: fused_s3_paths for fallback Neuroglancer generation",
+                        "attempted_json_path": ng_json_path,
+                        "json_exists": json_metadata is not None,
+                    },
                 )
-            
-            # Create the neuroglancer link
             ng_link = ng_utils.create_link_no_upload(
                 fused_s3_paths,
                 annotation_color=annotation_color,
@@ -591,15 +663,22 @@ async def create_neuroglancer_link(request: Request):
                 cell_id=cell_id,
                 spot_id=spot_id,
                 position=position,
-                point_annotation=point_annotation
+                point_annotation=point_annotation,
             )
-            
-        return {"url": ng_link}
+            logger.info(
+                "Successfully built Neuroglancer link via fallback direct method"
+            )
+
+        return {"url": ng_link, "used_json_method": use_json_method}
     except Exception as e:
-        logger.error(f"Error creating neuroglancer link: {str(e)}")
+        logger.error("Error creating neuroglancer link: %s", e, exc_info=True)
         return JSONResponse(
             status_code=500,
-            content={"error": f"Failed to create neuroglancer link: {str(e)}"}
+            content={
+                "error": f"Failed to create neuroglancer link: {str(e)}",
+                "attempted_json_path": ng_json_path,
+                "json_exists": json_metadata is not None,
+            },
         )
 
 @app.get("/api/datasets")
@@ -636,6 +715,8 @@ async def list_datasets():
         logger.error(f"Error listing datasets: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
 
+
+
 @app.post("/api/datasets/download")
 async def download_dataset(request: Request):
     """Download a dataset from S3 to local cache."""
@@ -651,9 +732,9 @@ async def download_dataset(request: Request):
         
         if not manifest_key:
             return JSONResponse(
-                status_code=404, 
+                status_code=404,
                 content={
-                    "error": f"Dataset not found on S3 - processing_manifest.json not found",
+                    "error": "Dataset not found on S3 - processing_manifest.json not found",
                     "checked_paths": [
                         f"s3://{S3_BUCKET}/{dataset_name}/processing_manifest.json",
                         f"s3://{S3_BUCKET}/{dataset_name}/derived/processing_manifest.json"
@@ -679,7 +760,7 @@ async def download_dataset(request: Request):
         
         if not spots_file:
             return JSONResponse(
-                status_code=404, 
+                status_code=404,
                 content={
                     "error": "Spots data file not found",
                     "checked_path": f"s3://{S3_BUCKET}/{spots_key}unmixed_spots_*.pkl"}
@@ -734,6 +815,8 @@ async def download_dataset(request: Request):
     except Exception as e:
         logger.error(f"Error downloading dataset: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 
 @app.post("/api/datasets/set-active")
 async def set_active_dataset(request: Request):

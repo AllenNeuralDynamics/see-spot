@@ -281,44 +281,33 @@ def create_link_from_json(
     import json
     from pathlib import Path
 
-    # Convert to Path object for easier handling
-    json_path = (
-        Path(ng_json_path)
-        if not isinstance(ng_json_path, Path)
-        else ng_json_path
-    )
+    # Robust handling of S3 vs local paths: avoid Path() on s3:// to prevent scheme collapse
+    is_s3 = isinstance(ng_json_path, str) and ng_json_path.startswith("s3://")
+    json_path_str = ng_json_path if is_s3 else str(Path(ng_json_path))
 
-    # Load the JSON file
     try:
-        if str(json_path).startswith("s3://"):
-            # Handle S3 paths
-            import boto3
-
-            s3_path = str(json_path)[5:]  # Remove 's3://'
+        if is_s3:
+            s3_path = json_path_str[5:]  # strip 's3://'
             parts = s3_path.split("/")
             bucket = parts[0]
             key = "/".join(parts[1:])
-
+            print(f"[ng_utils] Fetching Neuroglancer JSON from S3: bucket={bucket} key={key}")
             s3_client = boto3.client("s3")
             response = s3_client.get_object(Bucket=bucket, Key=key)
             json_content = response["Body"].read().decode("utf-8")
             state_dict = json.loads(json_content)
             print(f"Loaded Neuroglancer state from S3: s3://{bucket}/{key}")
         else:
-            # Handle local file paths
-            with open(json_path, "r") as f:
+            print(f"[ng_utils] Loading Neuroglancer JSON from local path: {json_path_str}")
+            with open(json_path_str, "r") as f:
                 state_dict = json.load(f)
-            print(f"Loaded Neuroglancer state from local file: {json_path}")
+            print(f"Loaded Neuroglancer state from local file: {json_path_str}")
     except FileNotFoundError:
-        raise FileNotFoundError(
-            f"Neuroglancer JSON file not found: {json_path}"
-        )
+        raise FileNotFoundError(f"Neuroglancer JSON file not found: {json_path_str}")
     except json.JSONDecodeError as e:
-        raise ValueError(f"Invalid JSON in file {json_path}: {e}")
+        raise ValueError(f"Invalid JSON in file {json_path_str}: {e}")
     except Exception as e:
-        raise Exception(
-            f"Error loading Neuroglancer JSON from {json_path}: {e}"
-        )
+        raise Exception(f"Error loading Neuroglancer JSON from {json_path_str}: {e}")
 
     # Update position
     state_dict["position"] = position
@@ -396,7 +385,6 @@ def read_zarr_resolution_boto(s3_path):
     Returns:
     list: Resolution in z,y,x order in micrometers
     """
-    import boto3
     import json
 
     # Parse the S3 path
@@ -442,7 +430,10 @@ def read_zarr_resolution_boto(s3_path):
                                     for idx in [z_idx, y_idx, x_idx]
                                 ):
                                     print(
-                                        f"Found resolution from multiscales: {[scale[z_idx], scale[y_idx], scale[x_idx]]}"
+                                        (
+                                            f"Found resolution from multiscales: "
+                                            f"{[scale[z_idx], scale[y_idx], scale[x_idx]]}"
+                                        )
                                     )
                                     return [
                                         scale[z_idx],
