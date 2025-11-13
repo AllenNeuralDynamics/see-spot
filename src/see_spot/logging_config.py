@@ -20,10 +20,7 @@ def setup_logging(level: str = "DEBUG") -> None:
                 "format": "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
             },
             "access": {
-                "format": (
-                    "%(asctime)s | %(levelname)-8s | uvicorn.access | "
-                    "%(client_addr)s - %(request_line)s -> %(status_code)s"
-                ),
+                "format": "%(asctime)s | %(levelname)-8s | uvicorn.access | %(message)s",
             },
         },
         "handlers": {

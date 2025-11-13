@@ -21,8 +21,8 @@ document.addEventListener('DOMContentLoaded', function () {
     const highlightRemovedToggle = document.getElementById('highlight_removed_toggle');
     const highlightRemovedStatus = document.getElementById('highlight_removed_status');
     const displayChanSelect = document.getElementById('display_chan_select');
-    const validSpotToggle = document.getElementById('valid_spot_toggle');
-    const validSpotStatus = document.getElementById('valid_spot_status');
+    // const validSpotToggle = document.getElementById('valid_spot_toggle');
+    // const validSpotStatus = document.getElementById('valid_spot_status');
     const xlimMin = document.getElementById('xlim_min');
     const xlimMax = document.getElementById('xlim_max');
     const ylimMin = document.getElementById('ylim_min');
@@ -34,6 +34,10 @@ document.addEventListener('DOMContentLoaded', function () {
     const summaryBarChartDom = document.getElementById('summary-bar-chart');
     const summaryHeatmapDom = document.getElementById('summary-heatmap');
     const futureChartDom = document.getElementById('future-chart');
+    const spotsContainerHeader = document.getElementById('spots_container_header');
+    const spotsContainerContent = document.getElementById('spots_container_content');
+    const spotsContainerToggle = document.getElementById('spots_container_toggle');
+    const selectedSpotsCount = document.getElementById('selected_spots_count');
     
     const myChart = echarts.init(chartDom);
     const summaryBarChart = echarts.init(summaryBarChartDom);
@@ -49,7 +53,7 @@ document.addEventListener('DOMContentLoaded', function () {
     let currentSampleSize = parseInt(sampleSizeInput.value) || 10000;
     let highlightReassigned = false;
     let highlightRemoved = false;
-    let displayChanMode = 'unmixed'; // 'unmixed' or 'mixed'
+    let displayChanMode = 'mixed'; // 'unmixed' or 'mixed'
     let isNeuroglancerMode = false;
     let spotDetails = {}; // Will store the spot details for neuroglancer lookup
     let fusedS3Paths = {}; // Will store the fused S3 paths from the API
@@ -57,6 +61,7 @@ document.addEventListener('DOMContentLoaded', function () {
     let ratiosMatrix = null; // Will store the ratios matrix from the API
     let sankeyData = null; // Will store the sankey flow data from the API
     let selectedSpots = new Set();
+    let currentDatasetName = 'Unknown Dataset'; // Track current dataset name
     
     // Chart limits variables
     let chartLimitsMode = 'auto'; // 'auto', 'fixed', 'minmax', 'percentile'
@@ -111,7 +116,15 @@ document.addEventListener('DOMContentLoaded', function () {
             });
     }
 
+    let dataTable = null; // Store DataTables instance
+    
     function updateDatasetTable() {
+        // Destroy existing DataTable if it exists
+        if (dataTable) {
+            dataTable.destroy();
+        }
+        
+        // Clear table body
         datasetTableBody.innerHTML = '';
         
         datasetList.forEach(dataset => {
@@ -135,18 +148,35 @@ document.addEventListener('DOMContentLoaded', function () {
                 statusText = 'Missing';
             }
             
-            // Truncate long dataset names for display
-            const displayName = dataset.name.length > 35 ? 
-                dataset.name.substring(0, 32) + '...' : dataset.name;
-            
+            // No truncation - show full dataset name
+            // Format date to show only date (YYYY-MM-DD) without time
+            const dateOnly = dataset.creation_date.split(' ')[0];
             row.innerHTML = `
-                <td title="${dataset.name}">${displayName}</td>
-                <td>${dataset.creation_date}</td>
+                <td title="${dataset.name}">${dataset.name}</td>
+                <td title="${dataset.creation_date}">${dateOnly}</td>
                 <td><span class="status-indicator ${statusClass}"></span>${statusText}</td>
             `;
             
             row.addEventListener('click', () => selectDataset(dataset.name, row));
             datasetTableBody.appendChild(row);
+        });
+        
+        // Initialize DataTables with custom configuration
+        dataTable = $('#dataset_table').DataTable({
+            paging: false, // Disable pagination since we have limited datasets
+            searching: true, // Enable search box
+            ordering: true, // Enable column sorting
+            info: false, // Hide "Showing X to Y of Z entries" text
+            columnDefs: [
+                { width: "45%", targets: 0 }, // Dataset Name column
+                { width: "35%", targets: 1 }, // Date Added column
+                { width: "20%", targets: 2, orderable: false } // Status column (no sorting)
+            ],
+            language: {
+                search: "Filter datasets:",
+                searchPlaceholder: "e.g., HCR_76710"
+            },
+            order: [[1, 'desc']] // Sort by Date Added (newest first) by default
         });
     }
 
@@ -204,6 +234,47 @@ document.addEventListener('DOMContentLoaded', function () {
                 messageDiv.parentNode.removeChild(messageDiv);
             }
         }, 5000);
+    }
+
+    // Function to update the dataset title display
+    function updateDatasetTitle(datasetName) {
+        console.log('updateDatasetTitle called with:', datasetName);
+        const titleElement = document.getElementById('dataset-title');
+        const nameSpan = titleElement.querySelector('.dataset-name');
+        
+        console.log('titleElement:', titleElement);
+        console.log('nameSpan:', nameSpan);
+        
+        if (!datasetName || datasetName === 'Unknown Dataset') {
+            console.log('No valid dataset name, showing loading state');
+            titleElement.classList.add('loading');
+            nameSpan.textContent = 'Loading dataset...';
+            return;
+        }
+        
+        // Remove loading state
+        titleElement.classList.remove('loading');
+        
+        // Format the dataset name for better readability
+        // Extract key parts: HCR_ID, capture date, processing date
+        const parts = datasetName.split('_');
+        let formattedName = datasetName;
+        
+        if (parts.length >= 3 && parts[0] === 'HCR') {
+            const hcrId = parts[1];
+            const captureDate = parts[2]; // YYYY-MM-DD format
+            formattedName = `HCR ${hcrId} (${captureDate})`;
+        }
+        
+        // Update the display
+        //nameSpan.textContent = formattedName;
+        nameSpan.textContent = datasetName; // Show full name, not formatted MJD
+        nameSpan.title = datasetName; // Full name in tooltip
+        
+        // Store current dataset name
+        currentDatasetName = datasetName;
+        
+        console.log(`Dataset title updated: ${formattedName}`);
     }
 
     // Dataset management event listeners
@@ -329,6 +400,25 @@ document.addEventListener('DOMContentLoaded', function () {
     // Initialize dataset management
     loadDatasetList();
 
+    // Toggle collapsible Selected Spots section
+    spotsContainerHeader.addEventListener('click', function() {
+        const isCollapsed = spotsContainerContent.classList.contains('collapsed');
+        
+        if (isCollapsed) {
+            spotsContainerContent.classList.remove('collapsed');
+            spotsContainerToggle.classList.remove('collapsed');
+        } else {
+            spotsContainerContent.classList.add('collapsed');
+            spotsContainerToggle.classList.add('collapsed');
+        }
+    });
+
+    // Function to update the selected spots count
+    function updateSelectedSpotsCount() {
+        const count = spotsTableBody.rows.length;
+        selectedSpotsCount.textContent = count;
+    }
+
     // Update current label when input changes
     labelInput.addEventListener('input', function() {
         currentLabel = labelInput.value.trim();
@@ -430,7 +520,7 @@ document.addEventListener('DOMContentLoaded', function () {
     
     // Fetch data function
     function fetchData(sampleSize, forceRefresh = false) {
-        const validSpotsOnly = validSpotToggle.checked;
+        const validSpotsOnly = false; // validSpotToggle.checked; // Toggle disabled
         const url = `/api/real_spots_data?sample_size=${sampleSize}${forceRefresh ? '&force_refresh=true' : ''}${validSpotsOnly ? '&valid_spots_only=true' : '&valid_spots_only=false'}`;
         console.log(`Fetching data with URL: ${url}`);
         
@@ -442,10 +532,19 @@ document.addEventListener('DOMContentLoaded', function () {
                 return response.json();
             })
             .then(data => {
-                console.log(`Fetched unmixed spots data with sample size ${sampleSize}:`, data);
+                console.log(`Fetched spots data with sample size ${sampleSize}:`, data);
+                console.log('Current dataset from API:', data.current_dataset);
                 
                 if (!data.spots_data || !data.channel_pairs || data.spots_data.length === 0) {
                     throw new Error("Invalid or empty data received from API");
+                }
+                
+                // Update dataset title if available
+                if (data.current_dataset) {
+                    console.log('Calling updateDatasetTitle with:', data.current_dataset);
+                    updateDatasetTitle(data.current_dataset);
+                } else {
+                    console.warn('No current_dataset field in API response');
                 }
 
                 channelPairs = data.channel_pairs;
@@ -1102,6 +1201,9 @@ document.addEventListener('DOMContentLoaded', function () {
         
         const labelCell = newRow.insertCell(); 
         labelCell.textContent = label || ''; // Label
+        
+        // Update the count
+        updateSelectedSpotsCount();
     }
 
     // Event listener for the clear button
@@ -1111,6 +1213,9 @@ document.addEventListener('DOMContentLoaded', function () {
             spotsTableBody.removeChild(spotsTableBody.firstChild);
         }
         console.log("Cleared selected spots table.");
+        
+        // Update the count
+        updateSelectedSpotsCount();
     });
 
     // Event listener for adding lasso selection to table
@@ -1390,25 +1495,25 @@ document.addEventListener('DOMContentLoaded', function () {
         updateChart();
     });
 
-    // Event listener for valid spot toggle
-    validSpotToggle.addEventListener('change', function() {
-        validSpotStatus.textContent = this.checked ? 'On' : 'Off';
-        
-        // Update toggle style
-        const toggleLabel = this.nextElementSibling;
-        const toggleSpan = toggleLabel.querySelector('span');
-        
-        if (this.checked) {
-            toggleLabel.style.backgroundColor = '#4CAF50'; // Green when active
-            toggleSpan.style.left = '22px';
-        } else {
-            toggleLabel.style.backgroundColor = '#ccc'; // Gray when inactive
-            toggleSpan.style.left = '2px';
-        }
-        
-        // Reload data with new filter setting
-        fetchData(currentSampleSize, false);
-    });
+    // Event listener for valid spot toggle - COMMENTED OUT
+    // validSpotToggle.addEventListener('change', function() {
+    //     validSpotStatus.textContent = this.checked ? 'On' : 'Off';
+    //     
+    //     // Update toggle style
+    //     const toggleLabel = this.nextElementSibling;
+    //     const toggleSpan = toggleLabel.querySelector('span');
+    //     
+    //     if (this.checked) {
+    //         toggleLabel.style.backgroundColor = '#4CAF50'; // Green when active
+    //         toggleSpan.style.left = '22px';
+    //     } else {
+    //         toggleLabel.style.backgroundColor = '#ccc'; // Gray when inactive
+    //         toggleSpan.style.left = '2px';
+    //     }
+    //     
+    //     // Reload data with new filter setting
+    //     fetchData(currentSampleSize, false);
+    // });
 
     // Chart limits event listeners
     function updateButtonStates() {

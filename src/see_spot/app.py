@@ -520,7 +520,8 @@ async def get_real_spots_data(
         "channel_pairs": channel_pairs,
         "spots_data": data_for_frontend,
         "spot_details": spot_details,
-        "fused_s3_paths": fused_s3_paths
+        "fused_s3_paths": fused_s3_paths,
+        "current_dataset": DATA_PREFIX  # Include current dataset name
     }
 
     if ratios_json:
@@ -681,6 +682,7 @@ async def create_neuroglancer_link(request: Request):
             },
         )
 
+
 @app.get("/api/datasets")
 async def list_datasets():
     """List all available datasets in the local cache."""
@@ -714,7 +716,6 @@ async def list_datasets():
     except Exception as e:
         logger.error(f"Error listing datasets: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
-
 
 
 @app.post("/api/datasets/download")
@@ -817,7 +818,6 @@ async def download_dataset(request: Request):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
-
 @app.post("/api/datasets/set-active")
 async def set_active_dataset(request: Request):
     """Set the active dataset for the application."""
@@ -856,11 +856,13 @@ async def set_active_dataset(request: Request):
         logger.error(f"Error setting active dataset: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
 
+
 @app.get("/")
 @app.get("/unmixed-spots")
 async def unmixed_spots_page(request: Request):
     logger.info("Unmixed spots page accessed")
     return templates.TemplateResponse("unmixed_spots.html", {"request": request})
+
 
 if __name__ == '__main__':
     uvicorn.run(app, host="0.0.0.0", port=8000)
