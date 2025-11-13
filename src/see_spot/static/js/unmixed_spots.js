@@ -68,6 +68,12 @@ document.addEventListener('DOMContentLoaded', function () {
     let currentXLimits = [0, 2000];
     let currentYLimits = [0, 2000];
     
+    // Filter ranges for R Value and Distance
+    let rValueRange = [0, 100];
+    let distanceRange = [0, 100];
+    let rValueFilter = [0, 100];
+    let distanceFilter = [0, 100];
+    
     // Neuroglancer click debounce variables
     let lastNeuroglancerClickTime = 0;
     let lastNeuroglancerSpotId = null;
@@ -399,6 +405,129 @@ document.addEventListener('DOMContentLoaded', function () {
 
     // Initialize dataset management
     loadDatasetList();
+    
+    // Setup noUiSlider elements
+    const rValueSliderEl = document.getElementById('r_value_slider');
+    const distanceSliderEl = document.getElementById('distance_slider');
+    const rValueMinLabel = document.getElementById('r_value_min_label');
+    const rValueMaxLabel = document.getElementById('r_value_max_label');
+    const distanceMinLabel = document.getElementById('distance_min_label');
+    const distanceMaxLabel = document.getElementById('distance_max_label');
+    const resetFiltersBtn = document.getElementById('reset_filters_btn');
+    
+    let rValueSlider = null;
+    let distanceSlider = null;
+    
+    // Function to update filter slider ranges based on data
+    function updateFilterSliderRanges() {
+        if (!allChartData || allChartData.length === 0) return;
+        if (typeof noUiSlider === 'undefined') {
+            console.error('noUiSlider library not loaded');
+            return;
+        }
+        
+        const rValues = allChartData.typedArrays.r;
+        const distValues = allChartData.typedArrays.dist;
+        
+        // Calculate 99th percentile for better range
+        const rSorted = new Float32Array(rValues).sort();
+        const distSorted = new Float32Array(distValues).sort();
+        
+        const r99 = rSorted[Math.floor(rSorted.length * 0.99)] || 1.0;
+        const dist99 = distSorted[Math.floor(distSorted.length * 0.99)] || 5.0;
+        
+        // Cap at reasonable maximums: R at 1.0, Distance at 5.0
+        const rMax = Math.min(r99, 1.0);
+        const distMax = Math.min(dist99, 5.0);
+        
+        rValueRange = [0, rMax];
+        distanceRange = [0, distMax];
+        rValueFilter = [0, rMax];
+        distanceFilter = [0, distMax];
+        
+        // Destroy existing sliders if they exist
+        if (rValueSlider) {
+            rValueSlider.destroy();
+        }
+        if (distanceSlider) {
+            distanceSlider.destroy();
+        }
+        
+        // Create R Value slider
+        rValueSlider = noUiSlider.create(rValueSliderEl, {
+            start: [0, rMax],
+            connect: true,
+            range: {
+                'min': 0,
+                'max': rMax
+            },
+            step: 0.01,
+            tooltips: [true, true],
+            format: {
+                to: function(value) {
+                    return value.toFixed(2);
+                },
+                from: function(value) {
+                    return Number(value);
+                }
+            }
+        });
+        
+        // Create Distance slider
+        distanceSlider = noUiSlider.create(distanceSliderEl, {
+            start: [0, distMax],
+            connect: true,
+            range: {
+                'min': 0,
+                'max': distMax
+            },
+            step: 0.05,
+            tooltips: [true, true],
+            format: {
+                to: function(value) {
+                    return value.toFixed(2);
+                },
+                from: function(value) {
+                    return Number(value);
+                }
+            }
+        });
+        
+        // Update labels
+        rValueMinLabel.textContent = '0.00';
+        rValueMaxLabel.textContent = rMax.toFixed(2);
+        distanceMinLabel.textContent = '0.00';
+        distanceMaxLabel.textContent = distMax.toFixed(2);
+        
+        // Add event listeners for R Value slider - use 'set' event to avoid excessive updates
+        rValueSlider.on('set', function(values, handle) {
+            rValueFilter[0] = parseFloat(values[0]);
+            rValueFilter[1] = parseFloat(values[1]);
+            updateChart();
+        });
+        
+        // Add event listeners for Distance slider - use 'set' event to avoid excessive updates
+        distanceSlider.on('set', function(values, handle) {
+            distanceFilter[0] = parseFloat(values[0]);
+            distanceFilter[1] = parseFloat(values[1]);
+            updateChart();
+        });
+        
+        console.log(`Filter ranges - R: [0, ${rMax.toFixed(2)}], Distance: [0, ${distMax.toFixed(2)}]`);
+    }
+    
+    // Reset filters button
+    resetFiltersBtn.addEventListener('click', function() {
+        if (rValueSlider && distanceSlider) {
+            rValueSlider.set([0, rValueRange[1]]);
+            distanceSlider.set([0, distanceRange[1]]);
+            
+            rValueFilter = [0, rValueRange[1]];
+            distanceFilter = [0, distanceRange[1]];
+            
+            updateChart();
+        }
+    });
 
     // Toggle collapsible Selected Spots section
     spotsContainerHeader.addEventListener('click', function() {
@@ -609,6 +738,9 @@ document.addEventListener('DOMContentLoaded', function () {
 
         // Create channel selector buttons
         createChannelSelector();
+        
+        // Update filter slider ranges based on data
+        updateFilterSliderRanges();
 
         // Set initial channel pair
         currentPairIndex = 0;
@@ -720,6 +852,26 @@ document.addEventListener('DOMContentLoaded', function () {
         spotsData.removed = removed;
     }
 
+    // Function to apply R Value and Distance filters
+    function applyFilters(data) {
+        const filtered = [];
+        const rValues = data.typedArrays.r;
+        const distValues = data.typedArrays.dist;
+        
+        for (let i = 0; i < data.length; i++) {
+            const r = rValues[i];
+            const dist = distValues[i];
+            
+            // Check if point passes both filters
+            if (r >= rValueFilter[0] && r <= rValueFilter[1] &&
+                dist >= distanceFilter[0] && dist <= distanceFilter[1]) {
+                filtered.push(i);
+            }
+        }
+        
+        return filtered;
+    }
+    
     function updateChart(newData = null) {
         if (newData) {
             allChartData = newData;
@@ -753,6 +905,15 @@ document.addEventListener('DOMContentLoaded', function () {
         const xField = `chan_${xChan}_intensity`;
         const yField = `chan_${yChan}_intensity`;
         
+        // Apply filters to get indices of points that pass
+        const filteredIndices = applyFilters(allChartData);
+        
+        // Update filter count display
+        const filterCountEl = document.getElementById('filter_count');
+        if (filterCountEl) {
+            filterCountEl.textContent = `Showing ${filteredIndices.length.toLocaleString()} of ${allChartData.length.toLocaleString()} points`;
+        }
+        
         // Create series data grouped by display channel (mixed or unmixed)
         const seriesData = {};
         const uniqueChannels = [];
@@ -768,7 +929,9 @@ document.addEventListener('DOMContentLoaded', function () {
         const reassigned = allChartData.reassigned;
         const removed = allChartData.removed;
         
-        for (let i = 0; i < allChartData.length; i++) {
+        // Only process filtered indices
+        for (let idx = 0; idx < filteredIndices.length; idx++) {
+            const i = filteredIndices[idx];
             // Use either unmixed channel or original channel based on display mode
             let displayChan = displayChanMode === 'mixed' ? channels[i] : unmixedChans[i];
             
@@ -954,8 +1117,8 @@ document.addEventListener('DOMContentLoaded', function () {
                 }, {})
             },
             grid: {
-                right: totalSliderWidth + sliderConfig.startRight + 40, // Make room for sliders and legend
-                bottom: 70 // Still need some bottom space for axis labels
+                right: 120, // Space for legend only
+                bottom: 70 // Space for axis labels
             },
             tooltip: {
                 trigger: 'item',
@@ -1051,58 +1214,6 @@ document.addEventListener('DOMContentLoaded', function () {
                     type: 'inside',
                     yAxisIndex: 0,
                     filterMode: 'empty'
-                }
-            ],
-            visualMap: [
-                {
-                    // R-value filter
-                    right: sliderConfig.startRight,
-                    top: 'center',
-                    dimension: 2, // The 'r' value is at index 2 in each data point array
-                    min: 0,
-                    max: r99Percentile,
-                    precision: 2,
-                    text: ['R Value'],
-                    textStyle: {
-                        fontSize: 12
-                    },
-                    ...sliderConfig,
-                    handleStyle: {
-                        color: '#4285f4'
-                    },
-                    inRange: {
-                        opacity: 1
-                    },
-                    outOfRange: {
-                        opacity: 0.01
-                    },
-                    seriesIndex: seriesIndices, // Explicitly set which series this visualMap controls
-                    hoverLink: false // Disable hover highlight when using the slider
-                },
-                {
-                    // Distance filter
-                    right: sliderConfig.startRight + sliderConfig.width + sliderConfig.gap,
-                    top: 'center',
-                    dimension: 6, // The 'dist' value is at index 6 in each data point array
-                    min: 0,
-                    max: dist99Percentile,
-                    precision: 2,
-                    text: ['Distance'],
-                    textStyle: {
-                        fontSize: 12
-                    },
-                    ...sliderConfig,
-                    handleStyle: {
-                        color: '#f83628ff'
-                    },
-                    inRange: {
-                        opacity: 1
-                    },
-                    outOfRange: {
-                        opacity: 0.01
-                    },
-                    seriesIndex: seriesIndices, // Explicitly set which series this visualMap controls
-                    hoverLink: false // Disable hover highlight when using the slider
                 }
             ],
             series: series

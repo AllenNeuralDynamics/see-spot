@@ -10,9 +10,12 @@
     <link rel="stylesheet" href="https://cdn.datatables.net/1.13.7/css/jquery.dataTables.min.css">
     <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
     <script src="https://cdn.datatables.net/1.13.7/js/jquery.dataTables.min.js"></script>
+    <!-- Include noUiSlider -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/nouislider@15.7.1/dist/nouislider.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/nouislider@15.7.1/dist/nouislider.min.js"></script>
     <style>
         body { font-family: sans-serif; display: flex; margin: 0; }
-        #sidebar { width: 200px; background-color: #ffffff; padding: 15px; height: 100vh; border-right: 1px solid #ddd; }
+        #sidebar { width: 260px; background-color: #ffffff; padding: 15px; height: 100vh; border-right: 1px solid #ddd; overflow-y: auto; }
         #main-content { 
             flex-grow: 1; 
             padding: 20px; 
@@ -377,6 +380,38 @@
             background-color: #f44336;
         }
         
+        /* noUiSlider custom styling */
+        .noUi-connect {
+            background: #4285f4;
+        }
+        
+        .noUi-handle {
+            border: 1px solid #d9d9d9;
+            border-radius: 3px;
+            background: #fff;
+            cursor: pointer;
+            box-shadow: inset 0 0 1px #fff, inset 0 1px 7px #ebebeb, 0 3px 6px -3px #bbb;
+        }
+        
+        .noUi-handle:before,
+        .noUi-handle:after {
+            background: #4285f4;
+        }
+        
+        .noUi-tooltip {
+            display: block;
+            position: absolute;
+            border: 1px solid #d9d9d9;
+            border-radius: 3px;
+            background: #fff;
+            color: #000;
+            padding: 2px 5px;
+            text-align: center;
+            white-space: nowrap;
+            font-size: 11px;
+            bottom: 120%;
+        }
+        
         /* DataTables custom styling */
         #dataset_table_wrapper .dataTables_filter {
             margin-bottom: 10px;
@@ -454,6 +489,28 @@
                     Click on points to see coordinates
                 </div>
             </div>
+        </div>
+        
+        <h3>Data Filters</h3>
+        <div style="padding: 10px; background-color: #f5f5f5; border-radius: 4px; margin-bottom: 15px;">
+            <div style="margin-bottom: 20px;">
+                <label style="font-weight: bold; display: block; margin-bottom: 8px;">R Value</label>
+                <div id="r_value_slider" style="margin: 0 10px 15px 10px;"></div>
+                <div style="display: flex; justify-content: space-between; font-size: 11px; color: #666;">
+                    <span id="r_value_min_label">0.00</span>
+                    <span id="r_value_max_label">1.00</span>
+                </div>
+            </div>
+            <div style="margin-bottom: 20px;">
+                <label style="font-weight: bold; display: block; margin-bottom: 8px;">Distance</label>
+                <div id="distance_slider" style="margin: 0 10px 15px 10px;"></div>
+                <div style="display: flex; justify-content: space-between; font-size: 11px; color: #666;">
+                    <span id="distance_min_label">0.00</span>
+                    <span id="distance_max_label">5.00</span>
+                </div>
+            </div>
+            <button id="reset_filters_btn" style="width: 100%; padding: 6px; background-color: #ff9800; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;">Reset Filters</button>
+            <div id="filter_count" style="margin-top: 10px; font-size: 12px; color: #666; text-align: center;"></div>
         </div>
         
         <h3>Chart Limits</h3>
