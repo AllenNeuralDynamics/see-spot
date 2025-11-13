@@ -38,6 +38,8 @@ document.addEventListener('DOMContentLoaded', function () {
     const spotsContainerContent = document.getElementById('spots_container_content');
     const spotsContainerToggle = document.getElementById('spots_container_toggle');
     const selectedSpotsCount = document.getElementById('selected_spots_count');
+    const neuroglancerClickedCount = document.getElementById('neuroglancer_clicked_count');
+    const clearNeuroglancerClicksBtn = document.getElementById('clear_neuroglancer_clicks_btn');
     
     const myChart = echarts.init(chartDom);
     const summaryBarChart = echarts.init(summaryBarChartDom);
@@ -78,6 +80,7 @@ document.addEventListener('DOMContentLoaded', function () {
     let lastNeuroglancerClickTime = 0;
     let lastNeuroglancerSpotId = null;
     const NEUROGLANCER_CLICK_DEBOUNCE_MS = 1000; // Prevent duplicate clicks within 1 second
+    let neuroglancerClickedSpots = new Set(); // Track clicked spot IDs for visual indication
     
     // Large data threshold - samples above this will use optimized rendering
     const LARGE_DATA_THRESHOLD = 25001;
@@ -409,14 +412,19 @@ document.addEventListener('DOMContentLoaded', function () {
     // Setup noUiSlider elements
     const rValueSliderEl = document.getElementById('r_value_slider');
     const distanceSliderEl = document.getElementById('distance_slider');
+    const markerSizeSliderEl = document.getElementById('marker_size_slider');
     const rValueMinLabel = document.getElementById('r_value_min_label');
     const rValueMaxLabel = document.getElementById('r_value_max_label');
     const distanceMinLabel = document.getElementById('distance_min_label');
     const distanceMaxLabel = document.getElementById('distance_max_label');
+    const markerSizeMinLabel = document.getElementById('marker_size_min_label');
+    const markerSizeMaxLabel = document.getElementById('marker_size_max_label');
     const resetFiltersBtn = document.getElementById('reset_filters_btn');
     
     let rValueSlider = null;
     let distanceSlider = null;
+    let markerSizeSlider = null;
+    let markerSizeMultiplier = 1.0; // Default marker size multiplier
     
     // Function to update filter slider ranges based on data
     function updateFilterSliderRanges() {
@@ -451,6 +459,9 @@ document.addEventListener('DOMContentLoaded', function () {
         }
         if (distanceSlider) {
             distanceSlider.destroy();
+        }
+        if (markerSizeSlider) {
+            markerSizeSlider.destroy();
         }
         
         // Create R Value slider
@@ -513,8 +524,42 @@ document.addEventListener('DOMContentLoaded', function () {
             updateChart();
         });
         
+        // Create Marker Size slider (0.5x to 3.0x)
+        markerSizeSlider = noUiSlider.create(markerSizeSliderEl, {
+            start: [1.0],
+            connect: [true, false],
+            range: {
+                'min': 0.5,
+                'max': 3.0
+            },
+            step: 0.1,
+            tooltips: [true],
+            format: {
+                to: function(value) {
+                    return value.toFixed(1) + '×';
+                },
+                from: function(value) {
+                    return Number(value.replace('×', ''));
+                }
+            }
+        });
+        
+        // Add event listener for Marker Size slider
+        markerSizeSlider.on('set', function(values, handle) {
+            markerSizeMultiplier = parseFloat(values[0]);
+            updateChart();
+        });
+        
         console.log(`Filter ranges - R: [0, ${rMax.toFixed(2)}], Distance: [0, ${distMax.toFixed(2)}]`);
     }
+    
+    // Clear neuroglancer clicked spots button
+    clearNeuroglancerClicksBtn.addEventListener('click', function() {
+        neuroglancerClickedSpots.clear();
+        neuroglancerClickedCount.textContent = '0';
+        updateChart();
+        console.log('Cleared all neuroglancer clicked spots');
+    });
     
     // Reset filters button
     resetFiltersBtn.addEventListener('click', function() {
@@ -524,6 +569,11 @@ document.addEventListener('DOMContentLoaded', function () {
             
             rValueFilter = [0, rValueRange[1]];
             distanceFilter = [0, distanceRange[1]];
+            
+            if (markerSizeSlider) {
+                markerSizeSlider.set([1.0]);
+                markerSizeMultiplier = 1.0;
+            }
             
             updateChart();
         }
@@ -980,9 +1030,28 @@ document.addEventListener('DOMContentLoaded', function () {
         const series = sortedChannels.map(channel => ({
             name: channel, // Remove the Mixed/Unmixed prefix from individual labels
             type: 'scatter',
-            data: seriesData[channel],
-            symbol: channel === 'Removed' ? 'triangle' : 'circle', // Use triangle symbol for removed spots 
-            symbolSize: channel === 'Removed' ? 8 : 5, // Larger size for removed symbols
+            data: seriesData[channel].map(point => {
+                const spotId = point.value[4];
+                const isClicked = neuroglancerClickedSpots.has(spotId);
+                const baseSize = (channel === 'Removed' ? 8 : 5) * markerSizeMultiplier;
+                
+                // Add symbol, symbolSize, and itemStyle to each data point
+                const dataPoint = {
+                    ...point,
+                    symbol: isClicked ? 'pin' : (channel === 'Removed' ? 'triangle' : 'circle'),
+                    symbolSize: isClicked ? baseSize * 4 : baseSize
+                };
+                
+                // Add itemStyle overrides for clicked spots
+                if (isClicked) {
+                    dataPoint.itemStyle = {
+                        borderWidth: 5,
+                        borderColor: '#000000'
+                    };
+                }
+                
+                return dataPoint;
+            }),
             // Add large dataset mode optimizations (but disable for Removed series to ensure visibility)
             large: channel !== 'Removed',
             largeThreshold: LARGE_DATA_THRESHOLD,
@@ -1010,8 +1079,14 @@ document.addEventListener('DOMContentLoaded', function () {
                 },
                 // Add visual styling for reassigned and removed spots
                 borderWidth: function(params) {
+                    const spotId = params.data.value[4];
                     const isReassigned = params.data.value[9];
                     const isRemoved = params.data.value[10];
+                    
+                    // Thick border for clicked spots
+                    if (neuroglancerClickedSpots.has(spotId)) {
+                        return 5;
+                    }
                     
                     // Add border if reassigned or removed
                     if (isReassigned || isRemoved) {
@@ -1020,8 +1095,14 @@ document.addEventListener('DOMContentLoaded', function () {
                     return 0;
                 },
                 borderColor: function(params) {
+                    const spotId = params.data.value[4];
                     const isReassigned = params.data.value[9];
                     const isRemoved = params.data.value[10];
+                    
+                    // Black border for clicked spots
+                    if (neuroglancerClickedSpots.has(spotId)) {
+                        return '#000000';
+                    }
                     
                     // Different border colors for different states
                     if (isReassigned && isRemoved) {
@@ -1034,6 +1115,20 @@ document.addEventListener('DOMContentLoaded', function () {
                     return '#ffffff';
                 },
                 borderType: 'solid',
+                shadowBlur: function(params) {
+                    const spotId = params.data.value[4];
+                    if (neuroglancerClickedSpots.has(spotId)) {
+                        return 15; // Glow effect for clicked spots
+                    }
+                    return 0;
+                },
+                shadowColor: function(params) {
+                    const spotId = params.data.value[4];
+                    if (neuroglancerClickedSpots.has(spotId)) {
+                        return 'rgba(255, 255, 255, 0.8)'; // White glow
+                    }
+                    return 'transparent';
+                },
                 opacity: function(params) {
                     // If highlighting reassigned, make non-reassigned more transparent
                     if (highlightReassigned) {
@@ -1412,6 +1507,10 @@ document.addEventListener('DOMContentLoaded', function () {
         lastNeuroglancerClickTime = currentTime;
         lastNeuroglancerSpotId = spotId;
         
+        // Add spot to clicked set and update counter
+        neuroglancerClickedSpots.add(spotId);
+        neuroglancerClickedCount.textContent = neuroglancerClickedSpots.size;
+        
         console.log("Handling Neuroglancer click for spot ID:", spotId);
         
         if (spotDetails[spotId]) {
@@ -1467,6 +1566,9 @@ document.addEventListener('DOMContentLoaded', function () {
             
             // Automatically create and open the neuroglancer link
             createAndOpenNeuroglancerLink(spotId, details);
+            
+            // Update chart to show clicked spot styling
+            updateChart();
             
             // Remove the notification after 5 seconds (increased from 3 seconds to give more time)
             setTimeout(() => {
