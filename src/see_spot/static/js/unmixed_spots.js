@@ -346,7 +346,7 @@ document.addEventListener('DOMContentLoaded', function () {
         .then(response => response.json())
         .then(data => {
             if (data.success) {
-                showDatasetMessage(`Successfully loaded dataset: ${data.dataset_name}`, 'success');
+                // showDatasetMessage(`Successfully loaded dataset: ${data.dataset_name}`, 'success');
                 loadDatasetList(); // Refresh the list to show new current dataset
                 
                 // Refresh the main data display

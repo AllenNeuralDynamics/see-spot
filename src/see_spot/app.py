@@ -19,7 +19,7 @@ from see_spot.s3_utils import (
     find_unmixed_spots_file, find_related_files,
     load_ratios_from_s3, load_summary_stats_from_s3,
     load_processing_manifest_from_s3, load_and_merge_spots_from_s3,
-    find_processing_manifest
+    find_processing_manifest, detect_tile_structure, extract_tile_suffix
 )
 
 # Initialize logging using central utility (idempotent)
@@ -260,6 +260,21 @@ async def get_real_spots_data(
     logger.info(f"Real spots data requested with sample size: {sample_size}, "
                 f"force_refresh: {force_refresh}, valid_spots_only: {valid_spots_only}")
 
+    # Detect if this is a tile dataset at the beginning - needed for all operations
+    import re
+    tile_pattern = re.compile(r'_X_\d+_Y_\d+_Z_\d+$')
+    tile_folder = None
+    base_dataset_name = DATA_PREFIX
+    
+    if tile_pattern.search(DATA_PREFIX):
+        # Extract tile suffix and reconstruct tile folder name
+        parts = DATA_PREFIX.rsplit('_', 6)  # Split last 6 parts (X_####_Y_####_Z_####)
+        if len(parts) > 1:
+            base_dataset_name = parts[0]
+            tile_suffix = '_'.join(parts[1:])
+            tile_folder = f"Tile_{tile_suffix}"
+            logger.info(f"Detected tile dataset: base={base_dataset_name}, tile={tile_folder}")
+
     # Check if we can use cached DataFrame
     if not force_refresh and df_cache["data"] is not None:
         logger.info(f"Using cached DataFrame from {df_cache['last_loaded']}. Shape: {df_cache['data'].shape}")
@@ -267,11 +282,12 @@ async def get_real_spots_data(
         # Load manifest and channels from cache if available, or re-fetch
         processing_manifest = df_cache.get("processing_manifest")
         spot_channels_from_manifest = df_cache.get("spot_channels_from_manifest")
+        
         if not processing_manifest or not spot_channels_from_manifest:
-            # Find manifest in either top level or derived folder
-            manifest_key = find_processing_manifest(S3_BUCKET, DATA_PREFIX)
+            # Find manifest in base dataset folder
+            manifest_key = find_processing_manifest(S3_BUCKET, base_dataset_name)
             if not manifest_key:
-                logger.error(f"Could not find processing_manifest.json for dataset {DATA_PREFIX}")
+                logger.error(f"Could not find processing_manifest.json for dataset {base_dataset_name}")
                 spot_channels_from_manifest = []
             else:
                 logger.info(f"Attempting to load processing manifest from: s3://{S3_BUCKET}/{manifest_key}")
@@ -282,14 +298,17 @@ async def get_real_spots_data(
                 df_cache["spot_channels_from_manifest"] = spot_channels_from_manifest
                 logger.info(f"Loaded spot channels from manifest: {spot_channels_from_manifest}")
             else:
-                logger.error(f"Could not load processing manifest or find 'spot_channels'. Manifest: {processing_manifest}")
+                logger.error(
+                    f"Could not load processing manifest or find 'spot_channels'. "
+                    f"Manifest: {processing_manifest}"
+                )
                 spot_channels_from_manifest = []
     else:
         # Need to load DataFrame from S3
-        # 1. Load processing manifest to determine paths and channels
-        manifest_key = find_processing_manifest(S3_BUCKET, DATA_PREFIX)
+        # 1. Load processing manifest from base dataset location
+        manifest_key = find_processing_manifest(S3_BUCKET, base_dataset_name)
         if not manifest_key:
-            logger.error(f"Could not find processing_manifest.json for dataset {DATA_PREFIX}.")
+            logger.error(f"Could not find processing_manifest.json for dataset {base_dataset_name}.")
             return JSONResponse(status_code=500, content={'error': 'Failed to find processing manifest'})
         
         logger.info(f"Attempting to load processing manifest from: s3://{S3_BUCKET}/{manifest_key}")
@@ -306,15 +325,17 @@ async def get_real_spots_data(
             logger.info(f"Loaded spot channels from manifest: {spot_channels_from_manifest}")
 
         # 2. Find and load the merged data
-        unmixed_spots_prefix = f"{DATA_PREFIX}/image_spot_spectral_unmixing/"
+        
+        unmixed_spots_prefix = f"{base_dataset_name}/image_spot_spectral_unmixing/"
         
         logger.info(f"Loading merged spots data for dataset: {DATA_PREFIX}")
         try:
             df_polars = load_and_merge_spots_from_s3(
-                S3_BUCKET, 
-                DATA_PREFIX, 
+                S3_BUCKET,
+                DATA_PREFIX,
                 unmixed_spots_prefix,
-                valid_spots_only
+                valid_spots_only,
+                tile_folder=tile_folder
             )
             if df_polars is None:
                 logger.error("Failed to load merged DataFrame from S3/cache.")
@@ -341,7 +362,11 @@ async def get_real_spots_data(
     ratios_data = None
     summary_stats_data = None
 
-    related_files_prefix = f"{DATA_PREFIX}/image_spot_spectral_unmixing/"
+    # Use base_dataset_name for related files prefix (tile or regular)
+    related_files_prefix = f"{base_dataset_name}/image_spot_spectral_unmixing/"
+    if tile_folder:
+        related_files_prefix = f"{related_files_prefix}{tile_folder}/"
+    
     unmixed_target_key = find_unmixed_spots_file(
         S3_BUCKET, related_files_prefix, "unmixed_spots_*.pkl"
     )
@@ -349,13 +374,7 @@ async def get_real_spots_data(
     if unmixed_target_key:
         df_cache["unmixed_spots_filename"] = Path(unmixed_target_key).name
         logger.info(f"Cached unmixed spots filename: {df_cache['unmixed_spots_filename']}")
-    
-    
-    # Store the unmixed spots filename in cache for neuroglancer logic
-    if unmixed_target_key:
-        df_cache["unmixed_spots_filename"] = Path(unmixed_target_key).name
-        logger.info(f"Cached unmixed spots filename: {df_cache['unmixed_spots_filename']}")
-    
+
     if unmixed_target_key:
         related_files = find_related_files(S3_BUCKET, related_files_prefix, unmixed_target_key)
         logger.info(f"Searching for related files in '{related_files_prefix}'. Found: {related_files}")
@@ -685,7 +704,7 @@ async def create_neuroglancer_link(request: Request):
 
 @app.get("/api/datasets")
 async def list_datasets():
-    """List all available datasets in the local cache."""
+    """List all available datasets in the local cache, including virtual tile datasets."""
     try:
         cache_path = Path("/s3-cache") / S3_BUCKET
         datasets = []
@@ -697,9 +716,12 @@ async def list_datasets():
                     stat = dataset_dir.stat()
                     creation_time = datetime.fromtimestamp(stat.st_mtime)
                     
-                    # Check if dataset has the required structure
+                    # Check if dataset has data - for virtual tile datasets, check for parquet file
+                    parquet_file = dataset_dir / f"{dataset_dir.name}.parquet"
                     spots_dir = dataset_dir / "image_spot_spectral_unmixing"
-                    has_data = spots_dir.exists()
+                    
+                    # Dataset has data if it has either the spots directory OR a parquet file
+                    has_data = spots_dir.exists() or parquet_file.exists()
                     
                     datasets.append({
                         "name": dataset_dir.name,
@@ -720,7 +742,7 @@ async def list_datasets():
 
 @app.post("/api/datasets/download")
 async def download_dataset(request: Request):
-    """Download a dataset from S3 to local cache."""
+    """Download a dataset from S3 to local cache. Detects tiled datasets and creates virtual entries."""
     try:
         data = await request.json()
         dataset_name = data.get("dataset_name")
@@ -755,63 +777,102 @@ async def download_dataset(request: Request):
         if manifest_local_path is None:
             return JSONResponse(status_code=500, content={"error": "Failed to download processing manifest"})
         
-        # Download the unmixed spots file (for merging and related files)
-        spots_key = f"{dataset_name}/image_spot_spectral_unmixing/"
-        spots_file = find_unmixed_spots_file(S3_BUCKET, spots_key, "unmixed_spots_*.pkl")
-        
-        if not spots_file:
-            return JSONResponse(
-                status_code=404,
-                content={
-                    "error": "Spots data file not found",
-                    "checked_path": f"s3://{S3_BUCKET}/{spots_key}unmixed_spots_*.pkl"}
-                
-            )
-        
-        # Try to create the merged parquet file by calling our new merge function
-        try:
-            merged_df = load_and_merge_spots_from_s3(S3_BUCKET, dataset_name, spots_key)
-            if merged_df is not None:
-                logger.info(f"Successfully created merged parquet file for dataset {dataset_name}")
-            else:
-                logger.warning(f"Could not create merged parquet file for dataset {dataset_name}")
-        except Exception as e:
-            logger.warning(f"Error creating merged parquet file: {e}")
-            # Continue anyway - the individual files will still be available
-        
-        # Try to download related files (ratios and summary stats)
-        related_files = find_related_files(S3_BUCKET, spots_key, spots_file)
-        
         downloaded_files = [str(manifest_local_path)]
         
-        # Add the parquet file to downloaded files if it was created
-        parquet_file = Path("/s3-cache") / S3_BUCKET / dataset_name / f"{dataset_name}.parquet"
-        if parquet_file.exists():
-            downloaded_files.append(str(parquet_file))
+        # Check for tile structure
+        tile_folders = detect_tile_structure(S3_BUCKET, dataset_name)
         
-        if related_files['ratios']:
-            ratios_local_path = s3_handler.download_file(
-                key=related_files['ratios'],
-                bucket_name=S3_BUCKET,
-                use_cache=True
-            )
-            if ratios_local_path:
-                downloaded_files.append(str(ratios_local_path))
-        
-        if related_files['summary_stats']:
-            stats_local_path = s3_handler.download_file(
-                key=related_files['summary_stats'],
-                bucket_name=S3_BUCKET,
-                use_cache=True
-            )
-            if stats_local_path:
-                downloaded_files.append(str(stats_local_path))
-        
-        return {
-            "success": True,
-            "dataset_name": dataset_name,
-            "downloaded_files": downloaded_files
-        }
+        if tile_folders:
+            # Tiled dataset - create virtual datasets for each tile
+            logger.info(f"Detected {len(tile_folders)} tiles in dataset {dataset_name}")
+            
+            for tile_folder in tile_folders:
+                tile_suffix = extract_tile_suffix(tile_folder)
+                virtual_dataset_name = f"{dataset_name}_{tile_suffix}"
+                spots_key = f"{dataset_name}/image_spot_spectral_unmixing/"
+                
+                logger.info(f"Creating virtual tile dataset: {virtual_dataset_name}")
+                
+                try:
+                    # Load and merge this tile's data
+                    merged_df = load_and_merge_spots_from_s3(
+                        S3_BUCKET, dataset_name, spots_key, tile_folder=tile_folder
+                    )
+                    if merged_df is not None:
+                        logger.info(f"Successfully created parquet for tile {virtual_dataset_name}")
+                        parquet_path = (
+                            Path("/s3-cache") / S3_BUCKET / virtual_dataset_name /
+                            f"{virtual_dataset_name}.parquet"
+                        )
+                        if parquet_path.exists():
+                            downloaded_files.append(str(parquet_path))
+                    else:
+                        logger.warning(f"Could not create parquet for tile {virtual_dataset_name}")
+                except Exception as e:
+                    logger.error(f"Error processing tile {tile_folder}: {e}", exc_info=True)
+            
+            return {
+                "success": True,
+                "dataset_name": dataset_name,
+                "is_tiled": True,
+                "tile_count": len(tile_folders),
+                "virtual_datasets": [f"{dataset_name}_{extract_tile_suffix(tf)}" for tf in tile_folders],
+                "downloaded_files": downloaded_files
+            }
+        else:
+            # Regular fused dataset - original behavior
+            spots_key = f"{dataset_name}/image_spot_spectral_unmixing/"
+            spots_file = find_unmixed_spots_file(S3_BUCKET, spots_key, "unmixed_spots_*.pkl")
+            
+            if not spots_file:
+                return JSONResponse(
+                    status_code=404,
+                    content={
+                        "error": "Spots data file not found",
+                        "checked_path": f"s3://{S3_BUCKET}/{spots_key}unmixed_spots_*.pkl"}
+                )
+            
+            # Create the merged parquet file
+            try:
+                merged_df = load_and_merge_spots_from_s3(S3_BUCKET, dataset_name, spots_key)
+                if merged_df is not None:
+                    logger.info(f"Successfully created merged parquet file for dataset {dataset_name}")
+                else:
+                    logger.warning(f"Could not create merged parquet file for dataset {dataset_name}")
+            except Exception as e:
+                logger.warning(f"Error creating merged parquet file: {e}")
+            
+            # Download related files (ratios and summary stats)
+            related_files = find_related_files(S3_BUCKET, spots_key, spots_file)
+            
+            parquet_file = Path("/s3-cache") / S3_BUCKET / dataset_name / f"{dataset_name}.parquet"
+            if parquet_file.exists():
+                downloaded_files.append(str(parquet_file))
+            
+            if related_files['ratios']:
+                ratios_local_path = s3_handler.download_file(
+                    key=related_files['ratios'],
+                    bucket_name=S3_BUCKET,
+                    use_cache=True
+                )
+                if ratios_local_path:
+                    downloaded_files.append(str(ratios_local_path))
+            
+            if related_files['summary_stats']:
+                stats_local_path = s3_handler.download_file(
+                    key=related_files['summary_stats'],
+                    bucket_name=S3_BUCKET,
+                    use_cache=True
+                )
+                if stats_local_path:
+                    downloaded_files.append(str(stats_local_path))
+            
+            return {
+                "success": True,
+                "dataset_name": dataset_name,
+                "is_tiled": False,
+                "downloaded_files": downloaded_files
+            }
     
     except Exception as e:
         logger.error(f"Error downloading dataset: {e}", exc_info=True)

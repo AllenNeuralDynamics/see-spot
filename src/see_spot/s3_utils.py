@@ -1,4 +1,4 @@
-from typing import Optional, Dict, List, Tuple, Any
+from typing import Optional, Dict, List, Any
 import polars as pl
 import pandas as pd  # Keep for compatibility where needed
 import numpy as np
@@ -16,6 +16,73 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+
+def detect_tile_structure(bucket: str, dataset_name: str) -> List[str]:
+    """
+    Check if dataset has tile subfolders in image_spot_spectral_unmixing.
+    
+    Args:
+        bucket: S3 bucket name
+        dataset_name: Dataset name/prefix
+        
+    Returns:
+        List of tile folder names (e.g., ["Tile_X_0001_Y_0000_Z_0000", ...])
+        Empty list if no tiles found or if it's a regular fused dataset.
+    """
+    logger.info(f"Checking for tile structure in dataset '{dataset_name}'")
+    
+    spots_prefix = f"{dataset_name}/image_spot_spectral_unmixing/"
+    
+    try:
+        # List objects to check for tile folders
+        objects = s3_handler.list_objects(
+            bucket_name=bucket, prefix=spots_prefix, max_keys=500
+        )
+        
+        if not objects:
+            logger.info(f"No objects found at {spots_prefix}")
+            return []
+        
+        # Look for folders that start with "Tile" (case-insensitive)
+        tile_folders = set()
+        for key in objects:
+            # Remove prefix to get relative path
+            relative_path = key[len(spots_prefix):] if key.startswith(spots_prefix) else key
+            
+            # Check if path contains a Tile folder
+            parts = relative_path.split('/')
+            if parts and parts[0].startswith(('Tile', 'tile')):
+                tile_folders.add(parts[0])
+        
+        tile_list = sorted(list(tile_folders))
+        
+        if tile_list:
+            logger.info(f"Found {len(tile_list)} tile folders: {tile_list[:5]}{'...' if len(tile_list) > 5 else ''}")
+        else:
+            logger.info("No tile folders found - appears to be a regular fused dataset")
+        
+        return tile_list
+        
+    except Exception as e:
+        logger.error(f"Error detecting tile structure: {e}", exc_info=True)
+        return []
+
+
+def extract_tile_suffix(tile_folder_name: str) -> str:
+    """
+    Extract coordinate suffix from tile folder name.
+    
+    Args:
+        tile_folder_name: e.g., "Tile_X_0001_Y_0000_Z_0000"
+        
+    Returns:
+        Coordinate suffix: e.g., "X_0001_Y_0000_Z_0000"
+    """
+    # Remove "Tile_" or "tile_" prefix
+    if tile_folder_name.lower().startswith('tile_'):
+        return tile_folder_name[5:]
+    return tile_folder_name
 
 
 def find_processing_manifest(bucket: str, dataset_name: str) -> Optional[str]:
@@ -193,13 +260,15 @@ def find_mixed_spots_file(
 
         if not found_files:
             logger.warning(
-                f"No mixed spots files matching pattern '{pattern}' found within the first {len(objects)} objects listed under prefix '{prefix}'."
+                f"No mixed spots files matching pattern '{pattern}' found within "
+                f"the first {len(objects)} objects listed under prefix '{prefix}'."
             )
             return None
 
         if len(found_files) > 1:
             logger.warning(
-                f"Multiple mixed spots files ({len(found_files)}) matching pattern found. Using the first one: {found_files[0]}"
+                f"Multiple mixed spots files ({len(found_files)}) matching pattern found. "
+                f"Using the first one: {found_files[0]}"
             )
 
         return found_files[0]  # Return the full key of the first match
@@ -218,7 +287,7 @@ def get_base_pattern_from_unmixed(unmixed_key: str) -> str:
     parts = filename.split("_")
     for part in parts:
         # add support for R-1 (default round for datasets without metadata)
-        if part.startswith("R") and (part[1:].isdigit() or part[1:] == '-1'): 
+        if part.startswith("R") and (part[1:].isdigit() or part[1:] == '-1'):
             return part
     return "R3"  # Default fallback
 
@@ -228,6 +297,7 @@ def load_and_merge_spots_from_s3(
     dataset_name: str,
     unmixed_spots_prefix: str,
     valid_spots_only: bool = True,
+    tile_folder: Optional[str] = None,
 ) -> Optional[pl.DataFrame]:
     """
     Load both mixed and unmixed spots files, merge them, cache as parquet, and return merged DataFrame.
@@ -237,12 +307,21 @@ def load_and_merge_spots_from_s3(
         dataset_name: Dataset name (used for parquet filename)
         unmixed_spots_prefix: S3 prefix where spots files are located
         valid_spots_only: If True, filter to only valid spots. If False, return all spots.
+        tile_folder: Optional tile folder name (e.g., "Tile_X_0001_Y_0000_Z_0000") for tiled datasets
 
     Returns:
         Merged Polars DataFrame or None if loading failed
     """
-    cache_dir = Path("/s3-cache") / bucket / dataset_name
-    parquet_file = cache_dir / f"{dataset_name}.parquet"
+    # Adjust paths for tile folder if provided
+    if tile_folder:
+        cache_dir = Path("/s3-cache") / bucket / f"{dataset_name}_{extract_tile_suffix(tile_folder)}"
+        parquet_file = cache_dir / f"{dataset_name}_{extract_tile_suffix(tile_folder)}.parquet"
+        # Update prefix to look inside tile folder
+        unmixed_spots_prefix = f"{unmixed_spots_prefix}{tile_folder}/"
+        logger.info(f"Loading tile dataset from: {unmixed_spots_prefix}")
+    else:
+        cache_dir = Path("/s3-cache") / bucket / dataset_name
+        parquet_file = cache_dir / f"{dataset_name}.parquet"
 
     # Check if merged parquet file already exists
     if parquet_file.exists():
@@ -268,7 +347,7 @@ def load_and_merge_spots_from_s3(
 
     # Need to download, merge, and cache
     logger.info(
-        f"Parquet file not found or corrupted. Downloading and merging spots files..."
+        "Parquet file not found or corrupted. Downloading and merging spots files..."
     )
 
     # 1. Find unmixed spots file
@@ -409,7 +488,8 @@ def find_unmixed_spots_file(
 
         if not found_files:
             logger.warning(
-                f"No files matching pattern '{pattern}' found within the first {len(objects)} objects listed under prefix '{prefix}'."
+                f"No files matching pattern '{pattern}' found within "
+                f"the first {len(objects)} objects listed under prefix '{prefix}'."
             )
             # Consider adding logic here to list more objects if needed (pagination)
             return None
@@ -451,10 +531,6 @@ def find_related_files(
     result = {"ratios": None, "summary_stats": None}
 
     try:
-        # Extract base filename without extension
-        spots_filename = Path(spots_file).stem
-        base_pattern = spots_filename.replace("unmixed_spots", "*")
-
         # List objects in the same directory
         objects = s3_handler.list_objects(
             bucket_name=bucket, prefix=prefix, max_keys=200
@@ -645,7 +721,7 @@ def load_pkl_from_s3(bucket: str, key: str) -> Optional[pd.DataFrame]:
     try:
         df = pd.read_pickle(local_file_path)
         n_all = df.shape[0]
-        df = df[df["valid_spot"] == True]
+        df = df[df["valid_spot"]]
         n_valid = df.shape[0]
         logger.info(f"Successfully loaded DataFrame. Shape: {df.shape}")
         logger.info(f"Total spots: {n_all}, Valid spots: {n_valid}")
@@ -657,7 +733,8 @@ def load_pkl_from_s3(bucket: str, key: str) -> Optional[pd.DataFrame]:
         return None
     except FileNotFoundError:
         logger.error(
-            f"Error loading pickle: Local file not found at {local_file_path} (should not happen if download succeeded)."
+            f"Error loading pickle: Local file not found at {local_file_path} "
+            "(should not happen if download succeeded)."
         )
         return None
     except Exception as e:

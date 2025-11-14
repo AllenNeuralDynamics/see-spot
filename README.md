@@ -19,6 +19,43 @@
 cd /home/matt.davis/code/see-spot && source .venv/bin/activate && cd src && uvicorn see_spot.app:app --host 0.0.0.0 --port 9999 --reload
 ```
 
+## Dataset Types
+
+### Regular (Fused) Datasets
+Standard datasets with fused image data at the top level:
+```
+dataset_name/
+  image_spot_spectral_unmixing/
+    mixed_spots_*.pkl
+    unmixed_spots_*.pkl
+  image_tile_fusing/fused/
+    channel_*.zarr
+```
+
+### Tiled (Non-Fused) Datasets
+Datasets with independent tile processing, where each tile has separate spot data:
+```
+dataset_name/
+  image_spot_spectral_unmixing/
+    Tile_X_0001_Y_0000_Z_0000/
+      mixed_spots_*_tile_*.pkl
+      unmixed_spots_*_tile_*.pkl
+    Tile_X_0002_Y_0000_Z_0000/
+      ...
+```
+
+When downloading a tiled dataset, the system automatically:
+- Detects tile subfolders (beginning with "Tile")
+- Creates virtual dataset entries for each tile
+- Names them as: `{dataset_name}_X_####_Y_####_Z_####`
+
+Example: Downloading `HCR_799211_2025-10-02_15-10-00_processed_2025-11-06_22-50-54` with tiles creates:
+- `HCR_799211_2025-10-02_15-10-00_processed_2025-11-06_22-50-54_X_0001_Y_0000_Z_0000`
+- `HCR_799211_2025-10-02_15-10-00_processed_2025-11-06_22-50-54_X_0002_Y_0000_Z_0000`
+- etc.
+
+Each virtual tile dataset appears as a separate entry in the dataset management table and can be loaded independently.
+
 ## Changelog
 + v0.5.0 (09-19-2025)
   + backend downloads mixed + unmixed tables, merges and saves as .parquet (massive compression)
