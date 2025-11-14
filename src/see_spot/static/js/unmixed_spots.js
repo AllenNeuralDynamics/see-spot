@@ -255,6 +255,14 @@ document.addEventListener('DOMContentLoaded', function () {
         console.log('titleElement:', titleElement);
         console.log('nameSpan:', nameSpan);
         
+        if (datasetName === null) {
+            // No dataset selected - show selection prompt
+            console.log('No dataset selected, showing prompt');
+            titleElement.classList.remove('loading');
+            nameSpan.textContent = 'Please select a dataset ➡️';
+            return;
+        }
+        
         if (!datasetName || datasetName === 'Unknown Dataset') {
             console.log('No valid dataset name, showing loading state');
             titleElement.classList.add('loading');
@@ -715,8 +723,8 @@ document.addEventListener('DOMContentLoaded', function () {
     // Initial sample size note update
     updateSampleSizeNote(currentSampleSize);
     
-    // Initial data fetch
-    fetchData(currentSampleSize, false);
+    // Don't fetch data on initial load - wait for user to select a dataset
+    // fetchData(currentSampleSize, false);
     
     // Initialize button states
     updateButtonStates();
@@ -737,6 +745,14 @@ document.addEventListener('DOMContentLoaded', function () {
             .then(data => {
                 console.log(`Fetched spots data with sample size ${sampleSize}:`, data);
                 console.log('Current dataset from API:', data.current_dataset);
+                
+                // Check if no dataset is selected
+                if (data.no_dataset_selected) {
+                    console.log('No dataset selected:', data.message);
+                    updateDatasetTitle(null);  // Show "Please select a dataset" message
+                    myChart.hideLoading();
+                    return;
+                }
                 
                 if (!data.spots_data || !data.channel_pairs || data.spots_data.length === 0) {
                     throw new Error("Invalid or empty data received from API");
@@ -810,6 +826,10 @@ document.addEventListener('DOMContentLoaded', function () {
         // Always convert to typed arrays for better performance
         convertToTypedArrays(spotsData);
 
+        // Set allChartData before calling updateFilterSliderRanges
+        // so the sliders have data to work with
+        allChartData = spotsData;
+
         // Create channel selector buttons
         createChannelSelector();
         
@@ -818,7 +838,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
         // Set initial channel pair
         currentPairIndex = 0;
-        updateChart(spotsData);
+        updateChart();  // Don't pass spotsData since allChartData is already set
     }
 
     function createChannelSelector() {

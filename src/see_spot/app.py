@@ -39,7 +39,7 @@ templates = Jinja2Templates(directory=templates_dir)
 
 # Configuration for the spots data
 S3_BUCKET = "aind-open-data"
-DATA_PREFIX = "HCR_749315_2025-05-08_14-00-00_processed_2025-05-17_22-15-31"  # set default for app load
+DATA_PREFIX = None  # No dataset loaded by default - user must select one
 SAMPLE_SIZE = 5000
 
 # In-memory cache for DataFrame to avoid reloading on every request
@@ -259,6 +259,17 @@ async def get_real_spots_data(
 ):
     logger.info(f"Real spots data requested with sample size: {sample_size}, "
                 f"force_refresh: {force_refresh}, valid_spots_only: {valid_spots_only}")
+
+    # Check if a dataset has been selected
+    if DATA_PREFIX is None:
+        logger.info("No dataset selected - returning empty response")
+        return JSONResponse(
+            status_code=200,
+            content={
+                "no_dataset_selected": True,
+                "message": "Please select a dataset from the Dataset Management panel"
+            }
+        )
 
     # Detect if this is a tile dataset at the beginning - needed for all operations
     import re
@@ -727,7 +738,7 @@ async def list_datasets():
                         "name": dataset_dir.name,
                         "creation_date": creation_time.strftime("%Y-%m-%d %H:%M:%S"),
                         "has_data": has_data,
-                        "is_current": dataset_dir.name == DATA_PREFIX
+                        "is_current": DATA_PREFIX is not None and dataset_dir.name == DATA_PREFIX
                     })
         
         # Sort by creation date (newest first)
@@ -749,6 +760,24 @@ async def download_dataset(request: Request):
         
         if not dataset_name:
             return JSONResponse(status_code=400, content={"error": "Dataset name is required"})
+        
+        # Check if this is already a virtual tile dataset (ends with _X_####_Y_####_Z_####)
+        import re
+        tile_pattern = re.compile(r'_X_\d+_Y_\d+_Z_\d+$')
+        if tile_pattern.search(dataset_name):
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": (
+                        f"Cannot download virtual tile dataset '{dataset_name}'. "
+                        "Please download the base dataset instead."
+                    ),
+                    "hint": (
+                        "Remove the tile suffix "
+                        "(e.g., '_X_0000_Y_0000_Z_0000') and try again."
+                    )
+                }
+            )
         
         # Check if dataset exists on S3 by looking for the processing manifest
         manifest_key = find_processing_manifest(S3_BUCKET, dataset_name)

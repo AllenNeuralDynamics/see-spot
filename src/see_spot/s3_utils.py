@@ -314,8 +314,27 @@ def load_and_merge_spots_from_s3(
     """
     # Adjust paths for tile folder if provided
     if tile_folder:
-        cache_dir = Path("/s3-cache") / bucket / f"{dataset_name}_{extract_tile_suffix(tile_folder)}"
-        parquet_file = cache_dir / f"{dataset_name}_{extract_tile_suffix(tile_folder)}.parquet"
+        # Check if dataset_name already has a tile suffix (virtual tile dataset)
+        import re
+        tile_pattern = re.compile(r'_X_\d+_Y_\d+_Z_\d+$')
+        if tile_pattern.search(dataset_name):
+            # dataset_name is already a virtual tile dataset - use it as-is
+            cache_dir = Path("/s3-cache") / bucket / dataset_name
+            parquet_file = cache_dir / f"{dataset_name}.parquet"
+            logger.info(
+                f"Virtual tile dataset detected: {dataset_name}, "
+                f"using as-is"
+            )
+        else:
+            # dataset_name is a base dataset - append tile suffix
+            tile_suffix = extract_tile_suffix(tile_folder)
+            cache_dir = (
+                Path("/s3-cache") / bucket / f"{dataset_name}_{tile_suffix}"
+            )
+            parquet_file = cache_dir / f"{dataset_name}_{tile_suffix}.parquet"
+            logger.info(
+                f"Base dataset with tile: {dataset_name}, tile: {tile_suffix}"
+            )
         # Update prefix to look inside tile folder
         unmixed_spots_prefix = f"{unmixed_spots_prefix}{tile_folder}/"
         logger.info(f"Loading tile dataset from: {unmixed_spots_prefix}")
