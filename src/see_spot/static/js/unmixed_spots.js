@@ -57,6 +57,7 @@ document.addEventListener('DOMContentLoaded', function () {
     let highlightRemoved = false;
     let displayChanMode = 'mixed'; // 'unmixed' or 'mixed'
     let isNeuroglancerMode = false;
+    let showDyeLines = false; // Toggle state for dye lines
     let spotDetails = {}; // Will store the spot details for neuroglancer lookup
     let fusedS3Paths = {}; // Will store the fused S3 paths from the API
     let summaryStats = null; // Will store the summary stats from the API
@@ -420,6 +421,8 @@ document.addEventListener('DOMContentLoaded', function () {
     const markerSizeMinLabel = document.getElementById('marker_size_min_label');
     const markerSizeMaxLabel = document.getElementById('marker_size_max_label');
     const resetFiltersBtn = document.getElementById('reset_filters_btn');
+    const dyeLinesToggle = document.getElementById('dye_lines_toggle');
+    const dyeLinesStatus = document.getElementById('dye_lines_status');
     
     let rValueSlider = null;
     let distanceSlider = null;
@@ -577,6 +580,27 @@ document.addEventListener('DOMContentLoaded', function () {
             
             updateChart();
         }
+    });
+
+    // Dye lines toggle event listener
+    dyeLinesToggle.addEventListener('change', function() {
+        showDyeLines = this.checked;
+        dyeLinesStatus.textContent = showDyeLines ? 'On' : 'Off';
+        
+        // Update toggle style
+        const toggleLabel = this.nextElementSibling;
+        const toggleSpan = toggleLabel.querySelector('span');
+        
+        if (showDyeLines) {
+            toggleLabel.style.backgroundColor = '#2196F3'; // Blue when active
+            toggleSpan.style.left = '22px';
+        } else {
+            toggleLabel.style.backgroundColor = '#ccc'; // Gray when inactive
+            toggleSpan.style.left = '2px';
+        }
+        
+        updateChart();
+        console.log(`Dye lines toggle: ${showDyeLines ? 'ON' : 'OFF'}`);
     });
 
     // Toggle collapsible Selected Spots section
@@ -921,6 +945,158 @@ document.addEventListener('DOMContentLoaded', function () {
         
         return filtered;
     }
+
+    /**
+     * Clip a line passing through origin with direction (dx, dy) to axis boundaries.
+     * Returns the two intersection points where the line enters/exits the visible rectangle.
+     * 
+     * @param {number} dx - X component of line direction (normalized)
+     * @param {number} dy - Y component of line direction (normalized)
+     * @param {Array<number>} xLimits - [xMin, xMax] for x-axis
+     * @param {Array<number>} yLimits - [yMin, yMax] for y-axis
+     * @returns {Object} Object with clipped {x0, y0, x1, y1} or null if no intersection
+     */
+    function clipLineToAxes(dx, dy, xLimits, yLimits) {
+        const [xMin, xMax] = xLimits;
+        const [yMin, yMax] = yLimits;
+        
+        // Line through origin: (x, y) = t * (dx, dy) for any scalar t
+        // Find all t values where line intersects the four boundaries
+        const tValues = [];
+        
+        // Intersection with x = xMin: t = xMin / dx (if dx != 0)
+        if (Math.abs(dx) > 1e-9) {
+            const t = xMin / dx;
+            const y = t * dy;
+            if (y >= yMin && y <= yMax) {
+                tValues.push({ t, x: xMin, y });
+            }
+        }
+        
+        // Intersection with x = xMax: t = xMax / dx
+        if (Math.abs(dx) > 1e-9) {
+            const t = xMax / dx;
+            const y = t * dy;
+            if (y >= yMin && y <= yMax) {
+                tValues.push({ t, x: xMax, y });
+            }
+        }
+        
+        // Intersection with y = yMin: t = yMin / dy (if dy != 0)
+        if (Math.abs(dy) > 1e-9) {
+            const t = yMin / dy;
+            const x = t * dx;
+            if (x >= xMin && x <= xMax) {
+                tValues.push({ t, x, y: yMin });
+            }
+        }
+        
+        // Intersection with y = yMax: t = yMax / dy
+        if (Math.abs(dy) > 1e-9) {
+            const t = yMax / dy;
+            const x = t * dx;
+            if (x >= xMin && x <= xMax) {
+                tValues.push({ t, x, y: yMax });
+            }
+        }
+        
+        // Need at least 2 intersections (line enters and exits rectangle)
+        if (tValues.length < 2) {
+            return null;
+        }
+        
+        // Sort by t value and take the two extremes (smallest and largest t)
+        tValues.sort((a, b) => a.t - b.t);
+        const start = tValues[0];
+        const end = tValues[tValues.length - 1];
+        
+        return {
+            x0: start.x,
+            y0: start.y,
+            x1: end.x,
+            y1: end.y
+        };
+    }
+
+    /**
+     * Calculate dye line endpoints for the current channel pair.
+     * The ratios matrix contains learned dye spectral signatures.
+     * Lines are clipped to the visible axis boundaries.
+     * 
+     * @param {string} xChan - X-axis channel (e.g., "488")
+     * @param {string} yChan - Y-axis channel (e.g., "514")
+     * @param {Array<Array<number>>} ratiosMatrix - NxN matrix of dye coefficients
+     * @param {Array<string>} channels - Ordered list of channel names
+     * @param {Array<number>} xLimits - [min, max] for x-axis
+     * @param {Array<number>} yLimits - [min, max] for y-axis
+     * @returns {Array<Object>} Array of dye line objects with endpoints and styling
+     */
+    function calculateDyeLines(xChan, yChan, ratiosMatrix, channels, xLimits, yLimits) {
+        if (!ratiosMatrix || ratiosMatrix.length === 0) {
+            console.warn('No ratios matrix available for dye lines');
+            return [];
+        }
+        
+        // Get indices of current channels
+        const xIdx = channels.indexOf(xChan);
+        const yIdx = channels.indexOf(yChan);
+        
+        if (xIdx === -1 || yIdx === -1) {
+            console.warn(`Channel indices not found: x=${xChan} (idx=${xIdx}), y=${yChan} (idx=${yIdx})`);
+            return [];
+        }
+        
+        const dyeLines = [];
+        const numDyes = ratiosMatrix.length;
+        
+        console.log(`Calculating dye lines: xChan=${xChan} (idx=${xIdx}), yChan=${yChan} (idx=${yIdx})`);
+        console.log(`Axis limits: x=[${xLimits[0]}, ${xLimits[1]}], y=[${yLimits[0]}, ${yLimits[1]}]`);
+        
+        // For each dye (each row represents a dye's spectral signature)
+        for (let d = 0; d < numDyes; d++) {
+            // Extract 2D projection of this dye's direction
+            // ratiosMatrix[d] is the d-th dye's coefficients across all channels
+            const dx = ratiosMatrix[d][xIdx]; // Coefficient for x-channel
+            const dy = ratiosMatrix[d][yIdx]; // Coefficient for y-channel
+            
+            // Normalize to unit length in this 2D subspace
+            const norm = Math.sqrt(dx * dx + dy * dy);
+            if (norm < 1e-9) {
+                console.log(`Skipping dye ${d} (channel ${channels[d]}): near-zero norm (${norm})`);
+                continue; // Skip near-zero vectors
+            }
+            
+            const ux = dx / norm;
+            const uy = dy / norm;
+            
+            // Clip the line to the visible axis boundaries
+            const clipped = clipLineToAxes(ux, uy, xLimits, yLimits);
+            
+            if (!clipped) {
+                console.log(`Skipping dye ${d} (channel ${channels[d]}): no intersection with visible area`);
+                continue;
+            }
+            
+            dyeLines.push({
+                dyeIndex: d,
+                channel: channels[d],
+                x0: clipped.x0,
+                y0: clipped.y0,
+                x1: clipped.x1,
+                y1: clipped.y1,
+                color: COLORS[channels[d]] || COLORS.default,
+                dx: dx,
+                dy: dy,
+                norm: norm
+            });
+            
+            console.log(`Dye line ${d} (${channels[d]}): dx=${dx.toFixed(3)}, dy=${dy.toFixed(3)}, ` +
+                       `clipped to [(${clipped.x0.toFixed(1)}, ${clipped.y0.toFixed(1)}) -> ` +
+                       `(${clipped.x1.toFixed(1)}, ${clipped.y1.toFixed(1)})]`);
+        }
+        
+        return dyeLines;
+    }
     
     function updateChart(newData = null) {
         if (newData) {
@@ -1176,6 +1352,121 @@ document.addEventListener('DOMContentLoaded', function () {
         // Get series indices for visualMap
         const seriesIndices = series.map((_, index) => index);
         
+        // Add dye lines if enabled
+        if (showDyeLines && ratiosMatrix && channelPairs.length > 0) {
+            // Get all channels for matrix lookup
+            let allChannels = [];
+            if (typeof summaryStats !== 'undefined' && summaryStats && summaryStats.length > 0) {
+                allChannels = summaryStats.map(stat => stat.channel.toString());
+            } else {
+                // Derive from channel pairs
+                const uniqueChans = new Set();
+                channelPairs.forEach(pair => {
+                    uniqueChans.add(pair[0].toString());
+                    uniqueChans.add(pair[1].toString());
+                });
+                allChannels = Array.from(uniqueChans).sort();
+            }
+            
+            // Only plot dye lines for the current pair
+            const currentPairChannels = [xChan.toString(), yChan.toString()];
+            console.log(`Drawing dye lines for current pair only: ${currentPairChannels}`);
+            
+            // Determine axis limits for dye line scaling
+            let xLims, yLims;
+            if (chartLimitsMode === 'auto') {
+                // Use data range for auto mode
+                const xField = `chan_${xChan}_intensity`;
+                const yField = `chan_${yChan}_intensity`;
+                const xValues = allChartData.typedArrays[xField];
+                const yValues = allChartData.typedArrays[yField];
+                
+                const xMax = Math.max(...xValues);
+                const yMax = Math.max(...yValues);
+                xLims = [0, xMax * 1.1]; // Add 10% padding
+                yLims = [0, yMax * 1.1];
+            } else {
+                // Use the actual axis limits that will be applied
+                xLims = currentXLimits;
+                yLims = currentYLimits;
+            }
+            
+            console.log(`Dye line scaling: x=[${xLims[0]}, ${xLims[1].toFixed(1)}], y=[${yLims[0]}, ${yLims[1].toFixed(1)}]`);
+            
+            const dyeLines = calculateDyeLines(
+                xChan.toString(),
+                yChan.toString(),
+                ratiosMatrix,
+                allChannels,
+                xLims,
+                yLims
+            );
+            
+            // Filter to only include dye lines for the current pair
+            const filteredDyeLines = dyeLines.filter(line => 
+                currentPairChannels.includes(line.channel)
+            );
+            
+            if (filteredDyeLines.length > 0) {
+                console.log(`Adding ${filteredDyeLines.length} dye lines to chart (filtered from ${dyeLines.length} total)`);
+                
+                // Add each dye line as a separate series
+                filteredDyeLines.forEach(line => {
+                    series.push({
+                        name: `Dye: ${line.channel}`,
+                        type: 'line',
+                        data: [[line.x0, line.y0], [line.x1, line.y1]],
+                        lineStyle: {
+                            color: line.color,
+                            width: 4,
+                            type: 'solid',
+                            opacity: 0.9
+                        },
+                        itemStyle: {
+                            color: line.color  // Ensure marker color matches line color
+                        },
+                        symbol: 'none',
+                        symbolSize: 0,
+                        emphasis: {
+                            disabled: true
+                        },
+                        zlevel: 10, // Render on top of scatter points
+                        silent: true, // Don't respond to mouse events
+                        animation: false,
+                        clip: false, // Keep rendering even when points are outside axis range
+                        // Show only line in legend (no marker)
+                        legendHoverLink: false,
+                        showSymbol: false,
+                        // Add text label at endpoint
+                        markPoint: {
+                            symbol: 'none',
+                            data: [{
+                                coord: [line.x1, line.y1],
+                                symbol: 'none',
+                                symbolSize: 0,
+                                itemStyle: {
+                                    opacity: 0
+                                },
+                                label: {
+                                    show: true,
+                                    formatter: line.channel,
+                                    position: 'top',
+                                    fontSize: 14,
+                                    fontWeight: 'bold',
+                                    color: line.color,
+                                    backgroundColor: 'rgba(255, 255, 255, 0.9)',
+                                    padding: 3,
+                                    borderRadius: 3
+                                }
+                            }]
+                        }
+                    });
+                });
+            } else {
+                console.log('No valid dye lines calculated for current pair');
+            }
+        }
+
         option = {
             // title: {
             //     text: `Intensity Scatter Plot: Channel ${xChan} vs ${yChan}`,
@@ -2014,14 +2305,19 @@ document.addEventListener('DOMContentLoaded', function () {
             channels = Array.from({length: ratiosMatrix.length}, (_, i) => `CH_${i}`);
         }
         
+        // Reverse the channels array for vertical flip
+        const reversedChannels = [...channels].reverse();
+        
         // Prepare data for heatmap
         const data = [];
         const maxValue = 100; // Maximum percentage in ratios matrix
         
-        // Transform matrix into heatmap data format
+        // Transform matrix into heatmap data format with vertical flip
         for (let i = 0; i < ratiosMatrix.length; i++) {
             for (let j = 0; j < ratiosMatrix[i].length; j++) {
-                data.push([i, j, ratiosMatrix[i][j]]);
+                // Flip vertically: map i to (n - 1 - i)
+                const flippedI = ratiosMatrix.length - 1 - i;
+                data.push([j, flippedI, ratiosMatrix[i][j]]);
             }
         }
         
@@ -2034,9 +2330,10 @@ document.addEventListener('DOMContentLoaded', function () {
             tooltip: {
                 position: 'top',
                 formatter: function(params) {
-                    const original = ratiosMatrix[params.data[0]][params.data[1]];
-                    const sourceChannel = channels[params.data[0]];
-                    const targetChannel = channels[params.data[1]];
+                    const flippedI = ratiosMatrix.length - 1 - params.data[1];
+                    const original = ratiosMatrix[flippedI][params.data[0]];
+                    const sourceChannel = channels[flippedI];
+                    const targetChannel = channels[params.data[0]];
                     return `Original: ${sourceChannel}<br>Reassigned: ${targetChannel}<br>Ratio: ${original}%`;
                 }
             },
@@ -2049,20 +2346,14 @@ document.addEventListener('DOMContentLoaded', function () {
                 data: channels,
                 splitArea: {
                     show: true
-                },
-                name: 'Reassigned',
-                nameLocation: 'middle',
-                nameGap: 30
+                }
             },
             yAxis: {
                 type: 'category',
-                data: channels,
+                data: reversedChannels,
                 splitArea: {
                     show: true
-                },
-                name: 'Original',
-                nameLocation: 'middle',
-                nameGap: 40
+                }
             },
             visualMap: {
                 min: 0,
