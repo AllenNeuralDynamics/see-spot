@@ -3,12 +3,19 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Unmixed Spots Visualization</title>
+    <title>SeeSpot - HCR spot visualization</title>
     <!-- Include ECharts -->
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+    <!-- Include DataTables -->
+    <link rel="stylesheet" href="https://cdn.datatables.net/1.13.7/css/jquery.dataTables.min.css">
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.datatables.net/1.13.7/js/jquery.dataTables.min.js"></script>
+    <!-- Include noUiSlider -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/nouislider@15.7.1/dist/nouislider.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/nouislider@15.7.1/dist/nouislider.min.js"></script>
     <style>
         body { font-family: sans-serif; display: flex; margin: 0; }
-        #sidebar { width: 200px; background-color: #ffffff; padding: 15px; height: 100vh; border-right: 1px solid #ddd; }
+        #sidebar { width: 260px; flex-shrink: 0; background-color: #ffffff; padding: 15px; height: 100vh; border-right: 1px solid #ddd; overflow-y: auto; display: flex; flex-direction: column; }
         #main-content { 
             flex-grow: 1; 
             padding: 20px; 
@@ -16,6 +23,7 @@
         }
         #charts-column {
             width: 55%;
+            flex-shrink: 0;
             display: flex;
             flex-direction: column;
         }
@@ -84,10 +92,46 @@
         }
         #spots_container { 
             border: 1px solid #ccc; 
-            padding: 10px; 
-            flex-grow: 1; 
-            overflow-y: auto; 
+            border-radius: 4px;
             margin-top: 10px;
+            display: flex;
+            flex-direction: column;
+            max-height: 400px; /* Limit height when expanded */
+        }
+        
+        #spots_container_header {
+            padding: 10px;
+            background-color: #f2f2f2;
+            border-bottom: 1px solid #ccc;
+            cursor: pointer;
+            user-select: none;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-weight: bold;
+        }
+        
+        #spots_container_header:hover {
+            background-color: #e8e8e8;
+        }
+        
+        #spots_container_toggle {
+            font-size: 18px;
+            transition: transform 0.3s;
+        }
+        
+        #spots_container_toggle.collapsed {
+            transform: rotate(-90deg);
+        }
+        
+        #spots_container_content {
+            padding: 10px;
+            overflow-y: auto;
+            flex-grow: 1;
+        }
+        
+        #spots_container_content.collapsed {
+            display: none;
         }
         #data-table { width: 100%; border-collapse: collapse; margin-top: 10px; }
         #data-table th, #data-table td { border: 1px solid #ddd; padding: 8px; text-align: left; }
@@ -99,9 +143,7 @@
             border: 1px solid #eee;
             background-color: #f9f9f9;
             border-radius: 4px;
-            overflow-y: auto; /* Add scrolling to controls if they get too tall */
             flex-shrink: 0; /* Prevent shrinking */
-            height: 305px; /* Reduced height to accommodate dataset panel */
         }
         #spots_controls > div { 
              display: flex;
@@ -113,6 +155,45 @@
             flex-wrap: wrap;
             gap: 10px;
             margin-top: 10px;
+        }
+        
+        /* Current Dataset Display Styles */
+        #current-dataset-display {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 12px 20px;
+            margin-bottom: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+            text-align: center;
+        }
+        
+        #dataset-title {
+            margin: 0;
+            color: white;
+            font-size: 16px;
+            font-weight: 600;
+            text-shadow: 0 1px 2px rgba(0,0,0,0.2);
+            letter-spacing: 0.3px;
+        }
+        
+        #dataset-title .dataset-icon {
+            font-size: 18px;
+            margin-right: 8px;
+        }
+        
+        #dataset-title .dataset-name {
+            font-family: 'Courier New', monospace;
+            font-weight: 500;
+        }
+        
+        #dataset-title.loading {
+            opacity: 0.7;
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 0.7; }
+            50% { opacity: 1; }
         }
         #channel_navigation {
             display: flex;
@@ -146,7 +227,8 @@
             border-radius: 6px;
             padding: 12px;
             margin-bottom: 15px;
-            height: 300px;
+            flex: 0 0 auto;
+            max-height: 35vh;
             display: flex;
             flex-direction: column;
         }
@@ -197,12 +279,14 @@
             border: 1px solid #ddd;
             border-radius: 4px;
             margin-bottom: 10px;
+            padding: 10px;
         }
         
         #dataset_table {
             width: 100%;
             border-collapse: collapse;
             font-size: 12px;
+            table-layout: fixed;
         }
         
         #dataset_table th {
@@ -218,6 +302,10 @@
         #dataset_table td {
             padding: 6px 8px;
             border-bottom: 1px solid #eee;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+            white-space: normal;
+            overflow: hidden;
         }
         
         #dataset_table tbody tr {
@@ -298,6 +386,72 @@
         .status-missing {
             background-color: #f44336;
         }
+        
+        /* noUiSlider custom styling */
+        .noUi-connect {
+            background: #4285f4;
+        }
+        
+        .noUi-handle {
+            border: 1px solid #d9d9d9;
+            border-radius: 3px;
+            background: #fff;
+            cursor: pointer;
+            box-shadow: inset 0 0 1px #fff, inset 0 1px 7px #ebebeb, 0 3px 6px -3px #bbb;
+        }
+        
+        .noUi-handle:before,
+        .noUi-handle:after {
+            background: #4285f4;
+        }
+        
+        .noUi-tooltip {
+            display: block;
+            position: absolute;
+            border: 1px solid #d9d9d9;
+            border-radius: 3px;
+            background: #fff;
+            color: #000;
+            padding: 2px 5px;
+            text-align: center;
+            white-space: nowrap;
+            font-size: 11px;
+            bottom: 120%;
+        }
+        
+        /* DataTables custom styling */
+        #dataset_table_wrapper .dataTables_filter {
+            margin-bottom: 10px;
+        }
+        
+        #dataset_table_wrapper .dataTables_filter input {
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            padding: 4px 8px;
+            margin-left: 5px;
+        }
+        
+        #dataset_table_wrapper .dataTables_length {
+            margin-bottom: 10px;
+        }
+        
+        #dataset_table_wrapper .dataTables_info {
+            font-size: 11px;
+            padding-top: 8px;
+        }
+        
+        #dataset_table_wrapper .dataTables_paginate {
+            padding-top: 8px;
+        }
+        
+        /* Ensure DataTables doesn't override our custom row styles */
+        #dataset_table tbody tr.current-dataset {
+            background-color: #e8f5e9 !important;
+        }
+        
+        #dataset_table tbody tr.selected {
+            background-color: #cce7ff !important;
+        }
     </style>
 </head>
 <body>
@@ -324,7 +478,7 @@
         <div style="text-align: center; margin-bottom: 20px;">
             <img src="/static/img/see-spot-logo.png" alt="SeeSpot Logo" style="width: 180px; margin-bottom: 10px;">
             <div style="font-size: 32px; font-weight: bold;">SeeSpot</div>
-            <div style="font-size: 16px; color: #666;">by @mattjdavis</div>
+            <div style="font-size: 12px; color: #999; margin-top: 2px;">v{{ version }} by @mattjdavis</div>
         </div>
         <div style="height: 20px;"></div>
         <h3>Hotkeys</h3>
@@ -341,12 +495,95 @@
                 <div style="font-size: 12px; color: #666;">
                     Click on points to see coordinates
                 </div>
+                <div style="font-size: 12px; color: #666; margin-top: 5px;">
+                    Clicked: <span id="neuroglancer_clicked_count" style="font-weight: bold; color: #4CAF50;">0</span> spots
+                </div>
+                <button id="clear_neuroglancer_clicks_btn" style="width: 100%; margin-top: 8px; padding: 4px; background-color: #ff5722; color: white; border: none; border-radius: 3px; cursor: pointer; font-size: 11px;">Clear Clicked Spots</button>
+            </div>
+        </div>
+        
+        <h3>Data Filters</h3>
+        <div style="padding: 10px; background-color: #f5f5f5; border-radius: 4px; margin-bottom: 15px;">
+            <div style="margin-bottom: 20px;">
+                <label style="font-weight: bold; display: block; margin-bottom: 8px;">R Value</label>
+                <div id="r_value_slider" style="margin: 0 10px 15px 10px;"></div>
+                <div style="display: flex; justify-content: space-between; font-size: 11px; color: #666;">
+                    <span id="r_value_min_label">0.00</span>
+                    <span id="r_value_max_label">1.00</span>
+                </div>
+            </div>
+            <div style="margin-bottom: 20px;">
+                <label style="font-weight: bold; display: block; margin-bottom: 8px;">Distance</label>
+                <div id="distance_slider" style="margin: 0 10px 15px 10px;"></div>
+                <div style="display: flex; justify-content: space-between; font-size: 11px; color: #666;">
+                    <span id="distance_min_label">0.00</span>
+                    <span id="distance_max_label">5.00</span>
+                </div>
+            </div>
+            <button id="reset_filters_btn" style="width: 100%; padding: 6px; background-color: #ff9800; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;">Reset Filters</button>
+            <div id="filter_count" style="margin-top: 10px; font-size: 12px; color: #666; text-align: center;"></div>
+        </div>
+        
+        <h3>Display</h3>
+        <div style="padding: 10px; background-color: #f5f5f5; border-radius: 4px; margin-bottom: 15px;">
+            <div style="margin-bottom: 20px;">
+                <label style="font-weight: bold; display: block; margin-bottom: 8px;">Marker Size</label>
+                <div id="marker_size_slider" style="margin: 0 10px 15px 10px;"></div>
+                <div style="display: flex; justify-content: space-between; font-size: 11px; color: #666;">
+                    <span id="marker_size_min_label">0.5×</span>
+                    <span id="marker_size_max_label">3.0×</span>
+                </div>
+            </div>
+            <div style="margin-bottom: 20px;">
+                <label style="font-weight: bold; display: block; margin-bottom: 8px;">Show Dye Lines</label>
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <div class="toggle-switch">
+                        <input type="checkbox" id="dye_lines_toggle" style="display: none;">
+                        <label for="dye_lines_toggle" style="position: relative; display: inline-block; width: 40px; height: 20px; background-color: #ccc; border-radius: 20px; cursor: pointer; transition: background-color 0.3s;">
+                            <span style="position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background-color: white; transition: left 0.3s;"></span>
+                        </label>
+                    </div>
+                    <span id="dye_lines_status" style="font-size: 13px;">Off</span>
+                </div>
+                <div style="font-size: 11px; color: #666; margin-top: 5px;">
+                    Display learned dye directions
+                </div>
+            </div>
+            <div style="margin-bottom: 15px;">
+                <label style="font-weight: bold; display: block; margin-bottom: 8px;">Display chan</label>
+                <select id="display_chan_select" style="width: 100%; padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 13px;">
+                    <option value="mixed">Mixed</option>
+                    <option value="unmixed">Unmixed</option>
+                </select>
+            </div>
+            <div style="margin-bottom: 15px;">
+                <label style="font-weight: bold; display: block; margin-bottom: 8px;">Show reassigned</label>
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <div class="toggle-switch">
+                        <input type="checkbox" id="highlight_reassigned_toggle" style="display: none;">
+                        <label for="highlight_reassigned_toggle" style="position: relative; display: inline-block; width: 40px; height: 20px; background-color: #ccc; border-radius: 20px; cursor: pointer; transition: background-color 0.3s;">
+                            <span style="position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background-color: white; transition: left 0.3s;"></span>
+                        </label>
+                    </div>
+                    <span id="highlight_status" style="font-size: 13px;">Off</span>
+                </div>
+            </div>
+            <div style="margin-bottom: 15px;">
+                <label style="font-weight: bold; display: block; margin-bottom: 8px;">Show removed</label>
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <div class="toggle-switch">
+                        <input type="checkbox" id="highlight_removed_toggle" style="display: none;">
+                        <label for="highlight_removed_toggle" style="position: relative; display: inline-block; width: 40px; height: 20px; background-color: #ccc; border-radius: 20px; cursor: pointer; transition: background-color 0.3s;">
+                            <span style="position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background-color: white; transition: left 0.3s;"></span>
+                        </label>
+                    </div>
+                    <span id="highlight_removed_status" style="font-size: 13px;">Off</span>
+                </div>
             </div>
         </div>
         
         <h3>Chart Limits</h3>
-                    <div class="chart-limits-section">
-                <h4>Chart Limits</h4>
+        <div class="chart-limits-section">
                 <div class="limit-inputs">
                     <label>Xlims:</label>
                     <input type="number" id="xlim_min" value="0" step="10" style="width: 50px;">
@@ -368,6 +605,14 @@
 
     <div id="main-content">
         <div id="charts-column">
+            <!-- Current Dataset Display -->
+            <div id="current-dataset-display">
+                <h2 id="dataset-title">
+                    <span class="dataset-icon">📊</span>
+                    <span class="dataset-name">Please select a dataset ➡️</span>
+                </h2>
+            </div>
+            
             <div id="main-chart"></div>
             <div id="channel_navigation">
                 <button id="prev_channel_pair">&lt;</button>
@@ -397,7 +642,7 @@
                         <thead>
                             <tr>
                                 <th>Dataset Name</th>
-                                <th>Date</th>
+                                <th>Added</th>
                                 <th>Status</th>
                             </tr>
                         </thead>
@@ -421,7 +666,7 @@
                         <span style="display: inline-block; transform: rotate(90deg);">↻</span> Refresh Cache
                     </button>
                 </div>
-                <div id="valid_spot_controls" style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
+                <!-- <div id="valid_spot_controls" style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
                     <label for="valid_spot_toggle">Valid Spots Only:</label>
                     <div class="toggle-switch">
                         <input type="checkbox" id="valid_spot_toggle" style="display: none;">
@@ -431,78 +676,51 @@
                     </div>
                     <span id="valid_spot_status" style="margin-left: 10px; font-size: 13px;">Off</span>
                     <span style="font-size: 12px; color: #666; margin-left: 10px;">(Turn off to see removed spots)</span>
-                </div>
+                </div> -->
                 <div id="sample_size_note" style="margin-bottom: 15px; padding: 8px; border-radius: 4px; background-color: #e8f5e9; font-size: 13px; display: flex; align-items: center;">
                     <span id="sample_size_icon" style="margin-right: 8px; font-weight: bold; color: #4caf50;">✓</span>
                     <span id="sample_size_text">Small sample: full feature set</span>
                 </div>
-                <div id="filters" style="display: flex; flex-direction: column; gap: 10px; margin-bottom: 15px; background-color: #ffebee; padding: 10px; border-radius: 4px;">
-                    <div style="font-weight: bold; margin-bottom: 5px;">Filters</div>
-                    <div style="display: flex; align-items: center; margin-bottom: 10px;">
-                        <label for="display_chan_select" style="margin-right: 10px;">Display chan:</label>
-                        <select id="display_chan_select" style="padding: 4px 8px; border: 1px solid #ccc; border-radius: 4px;">
-                            <option value="unmixed">Unmixed</option>
-                            <option value="mixed">Mixed</option>
-                        </select>
-                    </div>
-                    <div style="display: flex; align-items: center; margin-bottom: 10px;">
-                        <label for="highlight_reassigned_toggle" style="margin-right: 10px;">Show reassigned:</label>
-                        <div class="toggle-switch">
-                            <input type="checkbox" id="highlight_reassigned_toggle" style="display: none;">
-                            <label for="highlight_reassigned_toggle" style="position: relative; display: inline-block; width: 40px; height: 20px; background-color: #ccc; border-radius: 20px; cursor: pointer; transition: background-color 0.3s;">
-                                <span style="position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background-color: white; transition: left 0.3s;"></span>
-                            </label>
-                        </div>
-                        <span id="highlight_status" style="margin-left: 10px; font-size: 13px;">Off</span>
-                    </div>
-                    <div style="display: flex; align-items: center;">
-                        <label for="highlight_removed_toggle" style="margin-right: 10px;">Show removed:</label>
-                        <div class="toggle-switch">
-                            <input type="checkbox" id="highlight_removed_toggle" style="display: none;">
-                            <label for="highlight_removed_toggle" style="position: relative; display: inline-block; width: 40px; height: 20px; background-color: #ccc; border-radius: 20px; cursor: pointer; transition: background-color 0.3s;">
-                                <span style="position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background-color: white; transition: left 0.3s;"></span>
-                            </label>
-                        </div>
-                        <span id="highlight_removed_status" style="margin-left: 10px; font-size: 13px;">Off</span>
-                    </div>
-                </div>
-                <div id="label_controls" style="display: flex; flex-direction: column; gap: 10px; margin-bottom: 15px; background-color: #fff3e0; padding: 10px; border-radius: 4px;">
-                    <div style="font-weight: bold; margin-bottom: 5px;">Labeling Controls</div>
-                    <div>
-                        <label for="label_input">Current Label:</label>
-                        <input type="text" id="label_input" placeholder="Enter label (optional)">
-                        <span id="active_label_display" style="font-style: italic;">(None)</span>
-                    </div>
-                </div>
                 <div id="table_controls" style="display: flex; flex-direction: column; gap: 10px; margin-bottom: 15px; background-color: #e8f5e9; padding: 10px; border-radius: 4px;">
                     <div style="font-weight: bold; margin-bottom: 5px;">Table Controls</div>
+                    <div style="margin-bottom: 10px;">
+                        <label for="label_input" style="font-weight: normal; margin-right: 5px;">Current Label:</label>
+                        <input type="text" id="label_input" placeholder="Enter label (optional)" style="width: 120px; padding: 3px 6px; border: 1px solid #ccc; border-radius: 3px; font-size: 12px;">
+                        <span id="active_label_display" style="font-style: italic; margin-left: 5px; font-size: 12px;">(None)</span>
+                    </div>
                     <div id="spots_buttons_container">
                         <button id="add_lasso_selection_button">Add Lasso Selection</button>
                         <button id="clear_spots_button">Clear Selected Spots</button>
                         <button id="export_csv_button">Export Table as CSV</button>
+                        <button id="annotate_neuroglancer_button" style="background-color: #2196F3; color: white;">Annotate Neuroglancer</button>
                     </div>
                 </div>
             </div>
              <div id="spots_container">
-                <h3>Selected Spots</h3>
-                <table id="data-table">
-                    <thead>
-                        <tr>
-                            <th>Spot ID</th>
-                            <th>Channel</th>
-                            <th>X-Channel</th>
-                            <th>Y-Channel</th>
-                            <th>R</th>
-                            <th>Dist</th>
-                            <th>Unmixed</th>
-                            <th>Reassigned</th>
-                            <th>Label</th>
-                        </tr>
-                    </thead>
-                    <tbody id="data-table-body">
-                        <!-- Clicked spot details will be added here -->
-                    </tbody>
-                </table>
+                <div id="spots_container_header">
+                    <span>Selected Spots (<span id="selected_spots_count">0</span>)</span>
+                    <span id="spots_container_toggle" class="collapsed">▼</span>
+                </div>
+                <div id="spots_container_content" class="collapsed">
+                    <table id="data-table">
+                        <thead>
+                            <tr>
+                                <th>Spot ID</th>
+                                <th>Channel</th>
+                                <th>X-Channel</th>
+                                <th>Y-Channel</th>
+                                <th>R</th>
+                                <th>Dist</th>
+                                <th>Unmixed</th>
+                                <th>Reassigned</th>
+                                <th>Label</th>
+                            </tr>
+                        </thead>
+                        <tbody id="data-table-body">
+                            <!-- Clicked spot details will be added here -->
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </div>
     </div>

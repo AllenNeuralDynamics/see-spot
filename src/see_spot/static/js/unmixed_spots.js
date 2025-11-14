@@ -5,6 +5,7 @@ document.addEventListener('DOMContentLoaded', function () {
     const clearButton = document.getElementById('clear_spots_button');
     const addLassoButton = document.getElementById('add_lasso_selection_button');
     const exportCsvButton = document.getElementById('export_csv_button');
+    const annotateNeuroglancerButton = document.getElementById('annotate_neuroglancer_button');
     const labelInput = document.getElementById('label_input');
     const activeLabelDisplay = document.getElementById('active_label_display');
     const prevChannelButton = document.getElementById('prev_channel_pair');
@@ -21,8 +22,8 @@ document.addEventListener('DOMContentLoaded', function () {
     const highlightRemovedToggle = document.getElementById('highlight_removed_toggle');
     const highlightRemovedStatus = document.getElementById('highlight_removed_status');
     const displayChanSelect = document.getElementById('display_chan_select');
-    const validSpotToggle = document.getElementById('valid_spot_toggle');
-    const validSpotStatus = document.getElementById('valid_spot_status');
+    // const validSpotToggle = document.getElementById('valid_spot_toggle');
+    // const validSpotStatus = document.getElementById('valid_spot_status');
     const xlimMin = document.getElementById('xlim_min');
     const xlimMax = document.getElementById('xlim_max');
     const ylimMin = document.getElementById('ylim_min');
@@ -34,6 +35,12 @@ document.addEventListener('DOMContentLoaded', function () {
     const summaryBarChartDom = document.getElementById('summary-bar-chart');
     const summaryHeatmapDom = document.getElementById('summary-heatmap');
     const futureChartDom = document.getElementById('future-chart');
+    const spotsContainerHeader = document.getElementById('spots_container_header');
+    const spotsContainerContent = document.getElementById('spots_container_content');
+    const spotsContainerToggle = document.getElementById('spots_container_toggle');
+    const selectedSpotsCount = document.getElementById('selected_spots_count');
+    const neuroglancerClickedCount = document.getElementById('neuroglancer_clicked_count');
+    const clearNeuroglancerClicksBtn = document.getElementById('clear_neuroglancer_clicks_btn');
     
     const myChart = echarts.init(chartDom);
     const summaryBarChart = echarts.init(summaryBarChartDom);
@@ -49,24 +56,33 @@ document.addEventListener('DOMContentLoaded', function () {
     let currentSampleSize = parseInt(sampleSizeInput.value) || 10000;
     let highlightReassigned = false;
     let highlightRemoved = false;
-    let displayChanMode = 'unmixed'; // 'unmixed' or 'mixed'
+    let displayChanMode = 'mixed'; // 'unmixed' or 'mixed'
     let isNeuroglancerMode = false;
+    let showDyeLines = false; // Toggle state for dye lines
     let spotDetails = {}; // Will store the spot details for neuroglancer lookup
     let fusedS3Paths = {}; // Will store the fused S3 paths from the API
     let summaryStats = null; // Will store the summary stats from the API
     let ratiosMatrix = null; // Will store the ratios matrix from the API
     let sankeyData = null; // Will store the sankey flow data from the API
     let selectedSpots = new Set();
+    let currentDatasetName = 'Unknown Dataset'; // Track current dataset name
     
     // Chart limits variables
     let chartLimitsMode = 'auto'; // 'auto', 'fixed', 'minmax', 'percentile'
     let currentXLimits = [0, 2000];
     let currentYLimits = [0, 2000];
     
+    // Filter ranges for R Value and Distance
+    let rValueRange = [0, 100];
+    let distanceRange = [0, 100];
+    let rValueFilter = [0, 100];
+    let distanceFilter = [0, 100];
+    
     // Neuroglancer click debounce variables
     let lastNeuroglancerClickTime = 0;
     let lastNeuroglancerSpotId = null;
     const NEUROGLANCER_CLICK_DEBOUNCE_MS = 1000; // Prevent duplicate clicks within 1 second
+    let neuroglancerClickedSpots = new Set(); // Track clicked spot IDs for visual indication
     
     // Large data threshold - samples above this will use optimized rendering
     const LARGE_DATA_THRESHOLD = 25001;
@@ -111,7 +127,15 @@ document.addEventListener('DOMContentLoaded', function () {
             });
     }
 
+    let dataTable = null; // Store DataTables instance
+    
     function updateDatasetTable() {
+        // Destroy existing DataTable if it exists
+        if (dataTable) {
+            dataTable.destroy();
+        }
+        
+        // Clear table body
         datasetTableBody.innerHTML = '';
         
         datasetList.forEach(dataset => {
@@ -135,18 +159,37 @@ document.addEventListener('DOMContentLoaded', function () {
                 statusText = 'Missing';
             }
             
-            // Truncate long dataset names for display
-            const displayName = dataset.name.length > 35 ? 
-                dataset.name.substring(0, 32) + '...' : dataset.name;
-            
+            // No truncation - show full dataset name
+            // Format date to show only date (YYYY-MM-DD) without time
+            const dateOnly = dataset.creation_date.split(' ')[0];
             row.innerHTML = `
-                <td title="${dataset.name}">${displayName}</td>
-                <td>${dataset.creation_date}</td>
+                <td title="${dataset.name}">${dataset.name}</td>
+                <td title="${dataset.creation_date}">${dateOnly}</td>
                 <td><span class="status-indicator ${statusClass}"></span>${statusText}</td>
             `;
             
             row.addEventListener('click', () => selectDataset(dataset.name, row));
             datasetTableBody.appendChild(row);
+        });
+        
+        // Initialize DataTables with custom configuration
+        dataTable = $('#dataset_table').DataTable({
+            paging: false, // Disable pagination since we have limited datasets
+            searching: true, // Enable search box
+            ordering: true, // Enable column sorting
+            info: false, // Hide "Showing X to Y of Z entries" text
+            scrollX: false, // Disable horizontal scrolling
+            autoWidth: false, // Disable auto width calculation
+            columnDefs: [
+                { width: "80%", targets: 0, className: "text-wrap" }, // Dataset Name column
+                { width: "10%", targets: 1 }, // Date Added column
+                { width: "10%", targets: 2, orderable: false } // Status column (no sorting)
+            ],
+            language: {
+                search: "Filter datasets:",
+                searchPlaceholder: "e.g., HCR_76710"
+            },
+            order: [[1, 'desc']] // Sort by Date Added (newest first) by default
         });
     }
 
@@ -204,6 +247,55 @@ document.addEventListener('DOMContentLoaded', function () {
                 messageDiv.parentNode.removeChild(messageDiv);
             }
         }, 5000);
+    }
+
+    // Function to update the dataset title display
+    function updateDatasetTitle(datasetName) {
+        console.log('updateDatasetTitle called with:', datasetName);
+        const titleElement = document.getElementById('dataset-title');
+        const nameSpan = titleElement.querySelector('.dataset-name');
+        
+        console.log('titleElement:', titleElement);
+        console.log('nameSpan:', nameSpan);
+        
+        if (datasetName === null) {
+            // No dataset selected - show selection prompt
+            console.log('No dataset selected, showing prompt');
+            titleElement.classList.remove('loading');
+            nameSpan.textContent = 'Please select a dataset ➡️';
+            return;
+        }
+        
+        if (!datasetName || datasetName === 'Unknown Dataset') {
+            console.log('No valid dataset name, showing loading state');
+            titleElement.classList.add('loading');
+            nameSpan.textContent = 'Loading dataset...';
+            return;
+        }
+        
+        // Remove loading state
+        titleElement.classList.remove('loading');
+        
+        // Format the dataset name for better readability
+        // Extract key parts: HCR_ID, capture date, processing date
+        const parts = datasetName.split('_');
+        let formattedName = datasetName;
+        
+        if (parts.length >= 3 && parts[0] === 'HCR') {
+            const hcrId = parts[1];
+            const captureDate = parts[2]; // YYYY-MM-DD format
+            formattedName = `HCR ${hcrId} (${captureDate})`;
+        }
+        
+        // Update the display
+        //nameSpan.textContent = formattedName;
+        nameSpan.textContent = datasetName; // Show full name, not formatted MJD
+        nameSpan.title = datasetName; // Full name in tooltip
+        
+        // Store current dataset name
+        currentDatasetName = datasetName;
+        
+        console.log(`Dataset title updated: ${formattedName}`);
     }
 
     // Dataset management event listeners
@@ -266,7 +358,7 @@ document.addEventListener('DOMContentLoaded', function () {
         .then(response => response.json())
         .then(data => {
             if (data.success) {
-                showDatasetMessage(`Successfully loaded dataset: ${data.dataset_name}`, 'success');
+                // showDatasetMessage(`Successfully loaded dataset: ${data.dataset_name}`, 'success');
                 loadDatasetList(); // Refresh the list to show new current dataset
                 
                 // Refresh the main data display
@@ -328,6 +420,218 @@ document.addEventListener('DOMContentLoaded', function () {
 
     // Initialize dataset management
     loadDatasetList();
+    
+    // Setup noUiSlider elements
+    const rValueSliderEl = document.getElementById('r_value_slider');
+    const distanceSliderEl = document.getElementById('distance_slider');
+    const markerSizeSliderEl = document.getElementById('marker_size_slider');
+    const rValueMinLabel = document.getElementById('r_value_min_label');
+    const rValueMaxLabel = document.getElementById('r_value_max_label');
+    const distanceMinLabel = document.getElementById('distance_min_label');
+    const distanceMaxLabel = document.getElementById('distance_max_label');
+    const markerSizeMinLabel = document.getElementById('marker_size_min_label');
+    const markerSizeMaxLabel = document.getElementById('marker_size_max_label');
+    const resetFiltersBtn = document.getElementById('reset_filters_btn');
+    const dyeLinesToggle = document.getElementById('dye_lines_toggle');
+    const dyeLinesStatus = document.getElementById('dye_lines_status');
+    
+    let rValueSlider = null;
+    let distanceSlider = null;
+    let markerSizeSlider = null;
+    let markerSizeMultiplier = 1.0; // Default marker size multiplier
+    
+    // Function to update filter slider ranges based on data
+    function updateFilterSliderRanges() {
+        if (!allChartData || allChartData.length === 0) return;
+        if (typeof noUiSlider === 'undefined') {
+            console.error('noUiSlider library not loaded');
+            return;
+        }
+        
+        const rValues = allChartData.typedArrays.r;
+        const distValues = allChartData.typedArrays.dist;
+        
+        // Calculate 99th percentile for better range
+        const rSorted = new Float32Array(rValues).sort();
+        const distSorted = new Float32Array(distValues).sort();
+        
+        const r99 = rSorted[Math.floor(rSorted.length * 0.99)] || 1.0;
+        const dist99 = distSorted[Math.floor(distSorted.length * 0.99)] || 5.0;
+        
+        // Cap at reasonable maximums: R at 1.0, Distance at 5.0
+        const rMax = Math.min(r99, 1.0);
+        const distMax = Math.min(dist99, 5.0);
+        
+        rValueRange = [0, rMax];
+        distanceRange = [0, distMax];
+        rValueFilter = [0, rMax];
+        distanceFilter = [0, distMax];
+        
+        // Destroy existing sliders if they exist
+        if (rValueSlider) {
+            rValueSlider.destroy();
+        }
+        if (distanceSlider) {
+            distanceSlider.destroy();
+        }
+        if (markerSizeSlider) {
+            markerSizeSlider.destroy();
+        }
+        
+        // Create R Value slider
+        rValueSlider = noUiSlider.create(rValueSliderEl, {
+            start: [0, rMax],
+            connect: true,
+            range: {
+                'min': 0,
+                'max': rMax
+            },
+            step: 0.01,
+            tooltips: [true, true],
+            format: {
+                to: function(value) {
+                    return value.toFixed(2);
+                },
+                from: function(value) {
+                    return Number(value);
+                }
+            }
+        });
+        
+        // Create Distance slider
+        distanceSlider = noUiSlider.create(distanceSliderEl, {
+            start: [0, distMax],
+            connect: true,
+            range: {
+                'min': 0,
+                'max': distMax
+            },
+            step: 0.05,
+            tooltips: [true, true],
+            format: {
+                to: function(value) {
+                    return value.toFixed(2);
+                },
+                from: function(value) {
+                    return Number(value);
+                }
+            }
+        });
+        
+        // Update labels
+        rValueMinLabel.textContent = '0.00';
+        rValueMaxLabel.textContent = rMax.toFixed(2);
+        distanceMinLabel.textContent = '0.00';
+        distanceMaxLabel.textContent = distMax.toFixed(2);
+        
+        // Add event listeners for R Value slider - use 'set' event to avoid excessive updates
+        rValueSlider.on('set', function(values, handle) {
+            rValueFilter[0] = parseFloat(values[0]);
+            rValueFilter[1] = parseFloat(values[1]);
+            updateChart();
+        });
+        
+        // Add event listeners for Distance slider - use 'set' event to avoid excessive updates
+        distanceSlider.on('set', function(values, handle) {
+            distanceFilter[0] = parseFloat(values[0]);
+            distanceFilter[1] = parseFloat(values[1]);
+            updateChart();
+        });
+        
+        // Create Marker Size slider (0.5x to 3.0x)
+        markerSizeSlider = noUiSlider.create(markerSizeSliderEl, {
+            start: [1.0],
+            connect: [true, false],
+            range: {
+                'min': 0.5,
+                'max': 3.0
+            },
+            step: 0.1,
+            tooltips: [true],
+            format: {
+                to: function(value) {
+                    return value.toFixed(1) + '×';
+                },
+                from: function(value) {
+                    return Number(value.replace('×', ''));
+                }
+            }
+        });
+        
+        // Add event listener for Marker Size slider
+        markerSizeSlider.on('set', function(values, handle) {
+            markerSizeMultiplier = parseFloat(values[0]);
+            updateChart();
+        });
+        
+        console.log(`Filter ranges - R: [0, ${rMax.toFixed(2)}], Distance: [0, ${distMax.toFixed(2)}]`);
+    }
+    
+    // Clear neuroglancer clicked spots button
+    clearNeuroglancerClicksBtn.addEventListener('click', function() {
+        neuroglancerClickedSpots.clear();
+        neuroglancerClickedCount.textContent = '0';
+        updateChart();
+        console.log('Cleared all neuroglancer clicked spots');
+    });
+    
+    // Reset filters button
+    resetFiltersBtn.addEventListener('click', function() {
+        if (rValueSlider && distanceSlider) {
+            rValueSlider.set([0, rValueRange[1]]);
+            distanceSlider.set([0, distanceRange[1]]);
+            
+            rValueFilter = [0, rValueRange[1]];
+            distanceFilter = [0, distanceRange[1]];
+            
+            if (markerSizeSlider) {
+                markerSizeSlider.set([1.0]);
+                markerSizeMultiplier = 1.0;
+            }
+            
+            updateChart();
+        }
+    });
+
+    // Dye lines toggle event listener
+    dyeLinesToggle.addEventListener('change', function() {
+        showDyeLines = this.checked;
+        dyeLinesStatus.textContent = showDyeLines ? 'On' : 'Off';
+        
+        // Update toggle style
+        const toggleLabel = this.nextElementSibling;
+        const toggleSpan = toggleLabel.querySelector('span');
+        
+        if (showDyeLines) {
+            toggleLabel.style.backgroundColor = '#2196F3'; // Blue when active
+            toggleSpan.style.left = '22px';
+        } else {
+            toggleLabel.style.backgroundColor = '#ccc'; // Gray when inactive
+            toggleSpan.style.left = '2px';
+        }
+        
+        updateChart();
+        console.log(`Dye lines toggle: ${showDyeLines ? 'ON' : 'OFF'}`);
+    });
+
+    // Toggle collapsible Selected Spots section
+    spotsContainerHeader.addEventListener('click', function() {
+        const isCollapsed = spotsContainerContent.classList.contains('collapsed');
+        
+        if (isCollapsed) {
+            spotsContainerContent.classList.remove('collapsed');
+            spotsContainerToggle.classList.remove('collapsed');
+        } else {
+            spotsContainerContent.classList.add('collapsed');
+            spotsContainerToggle.classList.add('collapsed');
+        }
+    });
+
+    // Function to update the selected spots count
+    function updateSelectedSpotsCount() {
+        const count = spotsTableBody.rows.length;
+        selectedSpotsCount.textContent = count;
+    }
 
     // Update current label when input changes
     labelInput.addEventListener('input', function() {
@@ -422,15 +726,15 @@ document.addEventListener('DOMContentLoaded', function () {
     // Initial sample size note update
     updateSampleSizeNote(currentSampleSize);
     
-    // Initial data fetch
-    fetchData(currentSampleSize, false);
+    // Don't fetch data on initial load - wait for user to select a dataset
+    // fetchData(currentSampleSize, false);
     
     // Initialize button states
     updateButtonStates();
     
     // Fetch data function
     function fetchData(sampleSize, forceRefresh = false) {
-        const validSpotsOnly = validSpotToggle.checked;
+        const validSpotsOnly = false; // validSpotToggle.checked; // Toggle disabled
         const url = `/api/real_spots_data?sample_size=${sampleSize}${forceRefresh ? '&force_refresh=true' : ''}${validSpotsOnly ? '&valid_spots_only=true' : '&valid_spots_only=false'}`;
         console.log(`Fetching data with URL: ${url}`);
         
@@ -442,10 +746,27 @@ document.addEventListener('DOMContentLoaded', function () {
                 return response.json();
             })
             .then(data => {
-                console.log(`Fetched unmixed spots data with sample size ${sampleSize}:`, data);
+                console.log(`Fetched spots data with sample size ${sampleSize}:`, data);
+                console.log('Current dataset from API:', data.current_dataset);
+                
+                // Check if no dataset is selected
+                if (data.no_dataset_selected) {
+                    console.log('No dataset selected:', data.message);
+                    updateDatasetTitle(null);  // Show "Please select a dataset" message
+                    myChart.hideLoading();
+                    return;
+                }
                 
                 if (!data.spots_data || !data.channel_pairs || data.spots_data.length === 0) {
                     throw new Error("Invalid or empty data received from API");
+                }
+                
+                // Update dataset title if available
+                if (data.current_dataset) {
+                    console.log('Calling updateDatasetTitle with:', data.current_dataset);
+                    updateDatasetTitle(data.current_dataset);
+                } else {
+                    console.warn('No current_dataset field in API response');
                 }
 
                 channelPairs = data.channel_pairs;
@@ -508,12 +829,19 @@ document.addEventListener('DOMContentLoaded', function () {
         // Always convert to typed arrays for better performance
         convertToTypedArrays(spotsData);
 
+        // Set allChartData before calling updateFilterSliderRanges
+        // so the sliders have data to work with
+        allChartData = spotsData;
+
         // Create channel selector buttons
         createChannelSelector();
+        
+        // Update filter slider ranges based on data
+        updateFilterSliderRanges();
 
         // Set initial channel pair
         currentPairIndex = 0;
-        updateChart(spotsData);
+        updateChart();  // Don't pass spotsData since allChartData is already set
     }
 
     function createChannelSelector() {
@@ -621,6 +949,178 @@ document.addEventListener('DOMContentLoaded', function () {
         spotsData.removed = removed;
     }
 
+    // Function to apply R Value and Distance filters
+    function applyFilters(data) {
+        const filtered = [];
+        const rValues = data.typedArrays.r;
+        const distValues = data.typedArrays.dist;
+        
+        for (let i = 0; i < data.length; i++) {
+            const r = rValues[i];
+            const dist = distValues[i];
+            
+            // Check if point passes both filters
+            if (r >= rValueFilter[0] && r <= rValueFilter[1] &&
+                dist >= distanceFilter[0] && dist <= distanceFilter[1]) {
+                filtered.push(i);
+            }
+        }
+        
+        return filtered;
+    }
+
+    /**
+     * Clip a line passing through origin with direction (dx, dy) to axis boundaries.
+     * Returns the two intersection points where the line enters/exits the visible rectangle.
+     * 
+     * @param {number} dx - X component of line direction (normalized)
+     * @param {number} dy - Y component of line direction (normalized)
+     * @param {Array<number>} xLimits - [xMin, xMax] for x-axis
+     * @param {Array<number>} yLimits - [yMin, yMax] for y-axis
+     * @returns {Object} Object with clipped {x0, y0, x1, y1} or null if no intersection
+     */
+    function clipLineToAxes(dx, dy, xLimits, yLimits) {
+        const [xMin, xMax] = xLimits;
+        const [yMin, yMax] = yLimits;
+        
+        // Line through origin: (x, y) = t * (dx, dy) for any scalar t
+        // Find all t values where line intersects the four boundaries
+        const tValues = [];
+        
+        // Intersection with x = xMin: t = xMin / dx (if dx != 0)
+        if (Math.abs(dx) > 1e-9) {
+            const t = xMin / dx;
+            const y = t * dy;
+            if (y >= yMin && y <= yMax) {
+                tValues.push({ t, x: xMin, y });
+            }
+        }
+        
+        // Intersection with x = xMax: t = xMax / dx
+        if (Math.abs(dx) > 1e-9) {
+            const t = xMax / dx;
+            const y = t * dy;
+            if (y >= yMin && y <= yMax) {
+                tValues.push({ t, x: xMax, y });
+            }
+        }
+        
+        // Intersection with y = yMin: t = yMin / dy (if dy != 0)
+        if (Math.abs(dy) > 1e-9) {
+            const t = yMin / dy;
+            const x = t * dx;
+            if (x >= xMin && x <= xMax) {
+                tValues.push({ t, x, y: yMin });
+            }
+        }
+        
+        // Intersection with y = yMax: t = yMax / dy
+        if (Math.abs(dy) > 1e-9) {
+            const t = yMax / dy;
+            const x = t * dx;
+            if (x >= xMin && x <= xMax) {
+                tValues.push({ t, x, y: yMax });
+            }
+        }
+        
+        // Need at least 2 intersections (line enters and exits rectangle)
+        if (tValues.length < 2) {
+            return null;
+        }
+        
+        // Sort by t value and take the two extremes (smallest and largest t)
+        tValues.sort((a, b) => a.t - b.t);
+        const start = tValues[0];
+        const end = tValues[tValues.length - 1];
+        
+        return {
+            x0: start.x,
+            y0: start.y,
+            x1: end.x,
+            y1: end.y
+        };
+    }
+
+    /**
+     * Calculate dye line endpoints for the current channel pair.
+     * The ratios matrix contains learned dye spectral signatures.
+     * Lines are clipped to the visible axis boundaries.
+     * 
+     * @param {string} xChan - X-axis channel (e.g., "488")
+     * @param {string} yChan - Y-axis channel (e.g., "514")
+     * @param {Array<Array<number>>} ratiosMatrix - NxN matrix of dye coefficients
+     * @param {Array<string>} channels - Ordered list of channel names
+     * @param {Array<number>} xLimits - [min, max] for x-axis
+     * @param {Array<number>} yLimits - [min, max] for y-axis
+     * @returns {Array<Object>} Array of dye line objects with endpoints and styling
+     */
+    function calculateDyeLines(xChan, yChan, ratiosMatrix, channels, xLimits, yLimits) {
+        if (!ratiosMatrix || ratiosMatrix.length === 0) {
+            console.warn('No ratios matrix available for dye lines');
+            return [];
+        }
+        
+        // Get indices of current channels
+        const xIdx = channels.indexOf(xChan);
+        const yIdx = channels.indexOf(yChan);
+        
+        if (xIdx === -1 || yIdx === -1) {
+            console.warn(`Channel indices not found: x=${xChan} (idx=${xIdx}), y=${yChan} (idx=${yIdx})`);
+            return [];
+        }
+        
+        const dyeLines = [];
+        const numDyes = ratiosMatrix.length;
+        
+        console.log(`Calculating dye lines: xChan=${xChan} (idx=${xIdx}), yChan=${yChan} (idx=${yIdx})`);
+        console.log(`Axis limits: x=[${xLimits[0]}, ${xLimits[1]}], y=[${yLimits[0]}, ${yLimits[1]}]`);
+        
+        // For each dye (each row represents a dye's spectral signature)
+        for (let d = 0; d < numDyes; d++) {
+            // Extract 2D projection of this dye's direction
+            // ratiosMatrix[d] is the d-th dye's coefficients across all channels
+            const dx = ratiosMatrix[d][xIdx]; // Coefficient for x-channel
+            const dy = ratiosMatrix[d][yIdx]; // Coefficient for y-channel
+            
+            // Normalize to unit length in this 2D subspace
+            const norm = Math.sqrt(dx * dx + dy * dy);
+            if (norm < 1e-9) {
+                console.log(`Skipping dye ${d} (channel ${channels[d]}): near-zero norm (${norm})`);
+                continue; // Skip near-zero vectors
+            }
+            
+            const ux = dx / norm;
+            const uy = dy / norm;
+            
+            // Clip the line to the visible axis boundaries
+            const clipped = clipLineToAxes(ux, uy, xLimits, yLimits);
+            
+            if (!clipped) {
+                console.log(`Skipping dye ${d} (channel ${channels[d]}): no intersection with visible area`);
+                continue;
+            }
+            
+            dyeLines.push({
+                dyeIndex: d,
+                channel: channels[d],
+                x0: clipped.x0,
+                y0: clipped.y0,
+                x1: clipped.x1,
+                y1: clipped.y1,
+                color: COLORS[channels[d]] || COLORS.default,
+                dx: dx,
+                dy: dy,
+                norm: norm
+            });
+            
+            console.log(`Dye line ${d} (${channels[d]}): dx=${dx.toFixed(3)}, dy=${dy.toFixed(3)}, ` +
+                       `clipped to [(${clipped.x0.toFixed(1)}, ${clipped.y0.toFixed(1)}) -> ` +
+                       `(${clipped.x1.toFixed(1)}, ${clipped.y1.toFixed(1)})]`);
+        }
+        
+        return dyeLines;
+    }
+    
     function updateChart(newData = null) {
         if (newData) {
             allChartData = newData;
@@ -654,6 +1154,15 @@ document.addEventListener('DOMContentLoaded', function () {
         const xField = `chan_${xChan}_intensity`;
         const yField = `chan_${yChan}_intensity`;
         
+        // Apply filters to get indices of points that pass
+        const filteredIndices = applyFilters(allChartData);
+        
+        // Update filter count display
+        const filterCountEl = document.getElementById('filter_count');
+        if (filterCountEl) {
+            filterCountEl.textContent = `Showing ${filteredIndices.length.toLocaleString()} of ${allChartData.length.toLocaleString()} points`;
+        }
+        
         // Create series data grouped by display channel (mixed or unmixed)
         const seriesData = {};
         const uniqueChannels = [];
@@ -669,7 +1178,9 @@ document.addEventListener('DOMContentLoaded', function () {
         const reassigned = allChartData.reassigned;
         const removed = allChartData.removed;
         
-        for (let i = 0; i < allChartData.length; i++) {
+        // Only process filtered indices
+        for (let idx = 0; idx < filteredIndices.length; idx++) {
+            const i = filteredIndices[idx];
             // Use either unmixed channel or original channel based on display mode
             let displayChan = displayChanMode === 'mixed' ? channels[i] : unmixedChans[i];
             
@@ -718,9 +1229,28 @@ document.addEventListener('DOMContentLoaded', function () {
         const series = sortedChannels.map(channel => ({
             name: channel, // Remove the Mixed/Unmixed prefix from individual labels
             type: 'scatter',
-            data: seriesData[channel],
-            symbol: channel === 'Removed' ? 'triangle' : 'circle', // Use triangle symbol for removed spots 
-            symbolSize: channel === 'Removed' ? 8 : 5, // Larger size for removed symbols
+            data: seriesData[channel].map(point => {
+                const spotId = point.value[4];
+                const isClicked = neuroglancerClickedSpots.has(spotId);
+                const baseSize = (channel === 'Removed' ? 8 : 5) * markerSizeMultiplier;
+                
+                // Add symbol, symbolSize, and itemStyle to each data point
+                const dataPoint = {
+                    ...point,
+                    symbol: isClicked ? 'pin' : (channel === 'Removed' ? 'triangle' : 'circle'),
+                    symbolSize: isClicked ? baseSize * 4 : baseSize
+                };
+                
+                // Add itemStyle overrides for clicked spots
+                if (isClicked) {
+                    dataPoint.itemStyle = {
+                        borderWidth: 5,
+                        borderColor: '#000000'
+                    };
+                }
+                
+                return dataPoint;
+            }),
             // Add large dataset mode optimizations (but disable for Removed series to ensure visibility)
             large: channel !== 'Removed',
             largeThreshold: LARGE_DATA_THRESHOLD,
@@ -748,8 +1278,14 @@ document.addEventListener('DOMContentLoaded', function () {
                 },
                 // Add visual styling for reassigned and removed spots
                 borderWidth: function(params) {
+                    const spotId = params.data.value[4];
                     const isReassigned = params.data.value[9];
                     const isRemoved = params.data.value[10];
+                    
+                    // Thick border for clicked spots
+                    if (neuroglancerClickedSpots.has(spotId)) {
+                        return 5;
+                    }
                     
                     // Add border if reassigned or removed
                     if (isReassigned || isRemoved) {
@@ -758,8 +1294,14 @@ document.addEventListener('DOMContentLoaded', function () {
                     return 0;
                 },
                 borderColor: function(params) {
+                    const spotId = params.data.value[4];
                     const isReassigned = params.data.value[9];
                     const isRemoved = params.data.value[10];
+                    
+                    // Black border for clicked spots
+                    if (neuroglancerClickedSpots.has(spotId)) {
+                        return '#000000';
+                    }
                     
                     // Different border colors for different states
                     if (isReassigned && isRemoved) {
@@ -772,6 +1314,20 @@ document.addEventListener('DOMContentLoaded', function () {
                     return '#ffffff';
                 },
                 borderType: 'solid',
+                shadowBlur: function(params) {
+                    const spotId = params.data.value[4];
+                    if (neuroglancerClickedSpots.has(spotId)) {
+                        return 15; // Glow effect for clicked spots
+                    }
+                    return 0;
+                },
+                shadowColor: function(params) {
+                    const spotId = params.data.value[4];
+                    if (neuroglancerClickedSpots.has(spotId)) {
+                        return 'rgba(255, 255, 255, 0.8)'; // White glow
+                    }
+                    return 'transparent';
+                },
                 opacity: function(params) {
                     // If highlighting reassigned, make non-reassigned more transparent
                     if (highlightReassigned) {
@@ -819,6 +1375,121 @@ document.addEventListener('DOMContentLoaded', function () {
         // Get series indices for visualMap
         const seriesIndices = series.map((_, index) => index);
         
+        // Add dye lines if enabled
+        if (showDyeLines && ratiosMatrix && channelPairs.length > 0) {
+            // Get all channels for matrix lookup
+            let allChannels = [];
+            if (typeof summaryStats !== 'undefined' && summaryStats && summaryStats.length > 0) {
+                allChannels = summaryStats.map(stat => stat.channel.toString());
+            } else {
+                // Derive from channel pairs
+                const uniqueChans = new Set();
+                channelPairs.forEach(pair => {
+                    uniqueChans.add(pair[0].toString());
+                    uniqueChans.add(pair[1].toString());
+                });
+                allChannels = Array.from(uniqueChans).sort();
+            }
+            
+            // Only plot dye lines for the current pair
+            const currentPairChannels = [xChan.toString(), yChan.toString()];
+            console.log(`Drawing dye lines for current pair only: ${currentPairChannels}`);
+            
+            // Determine axis limits for dye line scaling
+            let xLims, yLims;
+            if (chartLimitsMode === 'auto') {
+                // Use data range for auto mode
+                const xField = `chan_${xChan}_intensity`;
+                const yField = `chan_${yChan}_intensity`;
+                const xValues = allChartData.typedArrays[xField];
+                const yValues = allChartData.typedArrays[yField];
+                
+                const xMax = Math.max(...xValues);
+                const yMax = Math.max(...yValues);
+                xLims = [0, xMax * 1.1]; // Add 10% padding
+                yLims = [0, yMax * 1.1];
+            } else {
+                // Use the actual axis limits that will be applied
+                xLims = currentXLimits;
+                yLims = currentYLimits;
+            }
+            
+            console.log(`Dye line scaling: x=[${xLims[0]}, ${xLims[1].toFixed(1)}], y=[${yLims[0]}, ${yLims[1].toFixed(1)}]`);
+            
+            const dyeLines = calculateDyeLines(
+                xChan.toString(),
+                yChan.toString(),
+                ratiosMatrix,
+                allChannels,
+                xLims,
+                yLims
+            );
+            
+            // Filter to only include dye lines for the current pair
+            const filteredDyeLines = dyeLines.filter(line => 
+                currentPairChannels.includes(line.channel)
+            );
+            
+            if (filteredDyeLines.length > 0) {
+                console.log(`Adding ${filteredDyeLines.length} dye lines to chart (filtered from ${dyeLines.length} total)`);
+                
+                // Add each dye line as a separate series
+                filteredDyeLines.forEach(line => {
+                    series.push({
+                        name: `Dye: ${line.channel}`,
+                        type: 'line',
+                        data: [[line.x0, line.y0], [line.x1, line.y1]],
+                        lineStyle: {
+                            color: line.color,
+                            width: 4,
+                            type: 'solid',
+                            opacity: 0.9
+                        },
+                        itemStyle: {
+                            color: line.color  // Ensure marker color matches line color
+                        },
+                        symbol: 'none',
+                        symbolSize: 0,
+                        emphasis: {
+                            disabled: true
+                        },
+                        zlevel: 10, // Render on top of scatter points
+                        silent: true, // Don't respond to mouse events
+                        animation: false,
+                        clip: false, // Keep rendering even when points are outside axis range
+                        // Show only line in legend (no marker)
+                        legendHoverLink: false,
+                        showSymbol: false,
+                        // Add text label at endpoint
+                        markPoint: {
+                            symbol: 'none',
+                            data: [{
+                                coord: [line.x1, line.y1],
+                                symbol: 'none',
+                                symbolSize: 0,
+                                itemStyle: {
+                                    opacity: 0
+                                },
+                                label: {
+                                    show: true,
+                                    formatter: line.channel,
+                                    position: 'top',
+                                    fontSize: 14,
+                                    fontWeight: 'bold',
+                                    color: line.color,
+                                    backgroundColor: 'rgba(255, 255, 255, 0.9)',
+                                    padding: 3,
+                                    borderRadius: 3
+                                }
+                            }]
+                        }
+                    });
+                });
+            } else {
+                console.log('No valid dye lines calculated for current pair');
+            }
+        }
+
         option = {
             // title: {
             //     text: `Intensity Scatter Plot: Channel ${xChan} vs ${yChan}`,
@@ -855,8 +1526,8 @@ document.addEventListener('DOMContentLoaded', function () {
                 }, {})
             },
             grid: {
-                right: totalSliderWidth + sliderConfig.startRight + 40, // Make room for sliders and legend
-                bottom: 70 // Still need some bottom space for axis labels
+                right: 120, // Space for legend only
+                bottom: 70 // Space for axis labels
             },
             tooltip: {
                 trigger: 'item',
@@ -952,58 +1623,6 @@ document.addEventListener('DOMContentLoaded', function () {
                     type: 'inside',
                     yAxisIndex: 0,
                     filterMode: 'empty'
-                }
-            ],
-            visualMap: [
-                {
-                    // R-value filter
-                    right: sliderConfig.startRight,
-                    top: 'center',
-                    dimension: 2, // The 'r' value is at index 2 in each data point array
-                    min: 0,
-                    max: r99Percentile,
-                    precision: 2,
-                    text: ['R Value'],
-                    textStyle: {
-                        fontSize: 12
-                    },
-                    ...sliderConfig,
-                    handleStyle: {
-                        color: '#4285f4'
-                    },
-                    inRange: {
-                        opacity: 1
-                    },
-                    outOfRange: {
-                        opacity: 0.01
-                    },
-                    seriesIndex: seriesIndices, // Explicitly set which series this visualMap controls
-                    hoverLink: false // Disable hover highlight when using the slider
-                },
-                {
-                    // Distance filter
-                    right: sliderConfig.startRight + sliderConfig.width + sliderConfig.gap,
-                    top: 'center',
-                    dimension: 6, // The 'dist' value is at index 6 in each data point array
-                    min: 0,
-                    max: dist99Percentile,
-                    precision: 2,
-                    text: ['Distance'],
-                    textStyle: {
-                        fontSize: 12
-                    },
-                    ...sliderConfig,
-                    handleStyle: {
-                        color: '#f83628ff'
-                    },
-                    inRange: {
-                        opacity: 1
-                    },
-                    outOfRange: {
-                        opacity: 0.01
-                    },
-                    seriesIndex: seriesIndices, // Explicitly set which series this visualMap controls
-                    hoverLink: false // Disable hover highlight when using the slider
                 }
             ],
             series: series
@@ -1102,6 +1721,9 @@ document.addEventListener('DOMContentLoaded', function () {
         
         const labelCell = newRow.insertCell(); 
         labelCell.textContent = label || ''; // Label
+        
+        // Update the count
+        updateSelectedSpotsCount();
     }
 
     // Event listener for the clear button
@@ -1111,6 +1733,9 @@ document.addEventListener('DOMContentLoaded', function () {
             spotsTableBody.removeChild(spotsTableBody.firstChild);
         }
         console.log("Cleared selected spots table.");
+        
+        // Update the count
+        updateSelectedSpotsCount();
     });
 
     // Event listener for adding lasso selection to table
@@ -1136,6 +1761,86 @@ document.addEventListener('DOMContentLoaded', function () {
             return;
         }
         exportTableToCSV('unmixed_spots_selection.csv');
+    });
+
+    // Annotate Neuroglancer Functionality
+    annotateNeuroglancerButton.addEventListener('click', function() {
+        if (spotsTableBody.rows.length === 0) {
+            alert("Table is empty. Add some spots first.");
+            return;
+        }
+        
+        // Collect spot IDs from the table
+        const spotIds = [];
+        for (let i = 0; i < spotsTableBody.rows.length; i++) {
+            const row = spotsTableBody.rows[i];
+            const spotId = row.cells[0].textContent; // First column is Spot ID
+            spotIds.push(spotId);
+        }
+        
+        // Limit to 1000 annotations
+        if (spotIds.length > 1000) {
+            if (!confirm(`You have ${spotIds.length} spots selected. Only the first 1000 will be annotated in Neuroglancer. Continue?`)) {
+                return;
+            }
+        }
+        
+        console.log(`Creating Neuroglancer link with ${spotIds.length} annotations`);
+        
+        // Disable button and show loading state
+        annotateNeuroglancerButton.disabled = true;
+        annotateNeuroglancerButton.textContent = 'Creating link...';
+        
+        // Prepare request data
+        const requestData = {
+            spot_ids: spotIds,
+            annotation_color: "#00FF00",  // Green for SeeSpot
+            cross_section_scale: 0.2,
+            layer_name: "SeeSpot"
+        };
+        
+        // Make API request
+        fetch('/api/create-neuroglancer-multi-annotations', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(requestData)
+        })
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`HTTP error! Status: ${response.status}`);
+            }
+            return response.json();
+        })
+        .then(data => {
+            if (data.url) {
+                console.log(`Neuroglancer link created with ${data.annotation_count} annotations`);
+                
+                // Show success message
+                const message = `Created Neuroglancer link with ${data.annotation_count} annotations!`;
+                if (data.missing_spots > 0) {
+                    alert(`${message}\n\nNote: ${data.missing_spots} spots were missing coordinate data and were skipped.`);
+                } else {
+                    alert(message);
+                }
+                
+                // Open URL in new tab
+                window.open(data.url, '_blank');
+            } else {
+                console.error("No URL returned from API");
+                alert("Failed to create Neuroglancer link. No URL returned.");
+            }
+        })
+        .catch(error => {
+            console.error("Error creating multi-annotation neuroglancer link:", error);
+            alert(`Error creating Neuroglancer link: ${error.message}`);
+        })
+        .finally(() => {
+            // Re-enable button and restore text
+            annotateNeuroglancerButton.disabled = false;
+            annotateNeuroglancerButton.textContent = 'Annotate Neuroglancer';
+        });
     });
 
     function escapeCsvCell(cellData) {
@@ -1196,6 +1901,10 @@ document.addEventListener('DOMContentLoaded', function () {
         lastNeuroglancerClickTime = currentTime;
         lastNeuroglancerSpotId = spotId;
         
+        // Add spot to clicked set and update counter
+        neuroglancerClickedSpots.add(spotId);
+        neuroglancerClickedCount.textContent = neuroglancerClickedSpots.size;
+        
         console.log("Handling Neuroglancer click for spot ID:", spotId);
         
         if (spotDetails[spotId]) {
@@ -1251,6 +1960,9 @@ document.addEventListener('DOMContentLoaded', function () {
             
             // Automatically create and open the neuroglancer link
             createAndOpenNeuroglancerLink(spotId, details);
+            
+            // Update chart to show clicked spot styling
+            updateChart();
             
             // Remove the notification after 5 seconds (increased from 3 seconds to give more time)
             setTimeout(() => {
@@ -1390,25 +2102,25 @@ document.addEventListener('DOMContentLoaded', function () {
         updateChart();
     });
 
-    // Event listener for valid spot toggle
-    validSpotToggle.addEventListener('change', function() {
-        validSpotStatus.textContent = this.checked ? 'On' : 'Off';
-        
-        // Update toggle style
-        const toggleLabel = this.nextElementSibling;
-        const toggleSpan = toggleLabel.querySelector('span');
-        
-        if (this.checked) {
-            toggleLabel.style.backgroundColor = '#4CAF50'; // Green when active
-            toggleSpan.style.left = '22px';
-        } else {
-            toggleLabel.style.backgroundColor = '#ccc'; // Gray when inactive
-            toggleSpan.style.left = '2px';
-        }
-        
-        // Reload data with new filter setting
-        fetchData(currentSampleSize, false);
-    });
+    // Event listener for valid spot toggle - COMMENTED OUT
+    // validSpotToggle.addEventListener('change', function() {
+    //     validSpotStatus.textContent = this.checked ? 'On' : 'Off';
+    //     
+    //     // Update toggle style
+    //     const toggleLabel = this.nextElementSibling;
+    //     const toggleSpan = toggleLabel.querySelector('span');
+    //     
+    //     if (this.checked) {
+    //         toggleLabel.style.backgroundColor = '#4CAF50'; // Green when active
+    //         toggleSpan.style.left = '22px';
+    //     } else {
+    //         toggleLabel.style.backgroundColor = '#ccc'; // Gray when inactive
+    //         toggleSpan.style.left = '2px';
+    //     }
+    //     
+    //     // Reload data with new filter setting
+    //     fetchData(currentSampleSize, false);
+    // });
 
     // Chart limits event listeners
     function updateButtonStates() {
@@ -1696,14 +2408,19 @@ document.addEventListener('DOMContentLoaded', function () {
             channels = Array.from({length: ratiosMatrix.length}, (_, i) => `CH_${i}`);
         }
         
+        // Reverse the channels array for vertical flip
+        const reversedChannels = [...channels].reverse();
+        
         // Prepare data for heatmap
         const data = [];
         const maxValue = 100; // Maximum percentage in ratios matrix
         
-        // Transform matrix into heatmap data format
+        // Transform matrix into heatmap data format with vertical flip
         for (let i = 0; i < ratiosMatrix.length; i++) {
             for (let j = 0; j < ratiosMatrix[i].length; j++) {
-                data.push([i, j, ratiosMatrix[i][j]]);
+                // Flip vertically: map i to (n - 1 - i)
+                const flippedI = ratiosMatrix.length - 1 - i;
+                data.push([j, flippedI, ratiosMatrix[i][j]]);
             }
         }
         
@@ -1716,9 +2433,10 @@ document.addEventListener('DOMContentLoaded', function () {
             tooltip: {
                 position: 'top',
                 formatter: function(params) {
-                    const original = ratiosMatrix[params.data[0]][params.data[1]];
-                    const sourceChannel = channels[params.data[0]];
-                    const targetChannel = channels[params.data[1]];
+                    const flippedI = ratiosMatrix.length - 1 - params.data[1];
+                    const original = ratiosMatrix[flippedI][params.data[0]];
+                    const sourceChannel = channels[flippedI];
+                    const targetChannel = channels[params.data[0]];
                     return `Original: ${sourceChannel}<br>Reassigned: ${targetChannel}<br>Ratio: ${original}%`;
                 }
             },
@@ -1731,20 +2449,14 @@ document.addEventListener('DOMContentLoaded', function () {
                 data: channels,
                 splitArea: {
                     show: true
-                },
-                name: 'Reassigned',
-                nameLocation: 'middle',
-                nameGap: 30
+                }
             },
             yAxis: {
                 type: 'category',
-                data: channels,
+                data: reversedChannels,
                 splitArea: {
                     show: true
-                },
-                name: 'Original',
-                nameLocation: 'middle',
-                nameGap: 40
+                }
             },
             visualMap: {
                 min: 0,

@@ -7,17 +7,79 @@
 ![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen?logo=codecov)
 ![Python](https://img.shields.io/badge/python->=3.10-blue?logo=python)
 
+## Quick Start
+
+### Installation
+```bash
+# Clone repository
+git clone https://github.com/AllenNeuralDynamics/see-spot.git
+cd see-spot
+
+# Run installer (uses defaults: port 5555, cache at ~/.seespot/cache)
+./install.sh
+
+# Or customize settings interactively
+./install.sh --interactive
+```
+
+### Launch
+```bash
+# Start the server
+seespot start
+
+# Access at http://localhost:5555
+```
+
+For detailed installation instructions, AWS credentials setup, and troubleshooting, see [INSTALL.md](INSTALL.md).
+
 ## App UI
 ![Spot Visualization](img/seespot-app-v.png)
 *Interactive dashboard showing spot channel analysis with Sankey flow diagram, scatter plot, and summary statistics*
 
-## start-up (local)
+## Development Setup
 + Install
   + `uv sync`
-+ Launch: 
++ Launch with auto-reload: 
 ```bash
 cd /home/matt.davis/code/see-spot && source .venv/bin/activate && cd src && uvicorn see_spot.app:app --host 0.0.0.0 --port 9999 --reload
 ```
+
+## Dataset Types
+
+### Regular (Fused) Datasets
+Standard datasets with fused image data at the top level:
+```
+dataset_name/
+  image_spot_spectral_unmixing/
+    mixed_spots_*.pkl
+    unmixed_spots_*.pkl
+  image_tile_fusing/fused/
+    channel_*.zarr
+```
+
+### Tiled (Non-Fused) Datasets
+Datasets with independent tile processing, where each tile has separate spot data:
+```
+dataset_name/
+  image_spot_spectral_unmixing/
+    Tile_X_0001_Y_0000_Z_0000/
+      mixed_spots_*_tile_*.pkl
+      unmixed_spots_*_tile_*.pkl
+    Tile_X_0002_Y_0000_Z_0000/
+      ...
+```
+
+When downloading a tiled dataset, the system automatically:
+- Detects tile subfolders (beginning with "Tile")
+- Creates virtual dataset entries for each tile
+- Names them as: `{dataset_name}_X_####_Y_####_Z_####`
+
+Example: Downloading `HCR_799211_2025-10-02_15-10-00_processed_2025-11-06_22-50-54` with tiles creates:
+- `HCR_799211_2025-10-02_15-10-00_processed_2025-11-06_22-50-54_X_0001_Y_0000_Z_0000`
+- `HCR_799211_2025-10-02_15-10-00_processed_2025-11-06_22-50-54_X_0002_Y_0000_Z_0000`
+- etc.
+
+Each virtual tile dataset appears as a separate entry in the dataset management table and can be loaded independently.
 
 ## Changelog
 + v0.5.0 (09-19-2025)

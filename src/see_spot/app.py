@@ -2,28 +2,66 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-import numpy as np
-import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
+from see_spot import ng_utils
+from see_spot import __version__
 import uvicorn
 import logging
 import os
-import json
 from pathlib import Path
 import polars as pl
 import itertools
 from typing import List, Tuple, Dict, Any
+import yaml
 
 # Import your modules
 from see_spot.s3_handler import s3_handler
+from see_spot.logging_config import setup_logging
 from see_spot.s3_utils import (
     find_unmixed_spots_file, find_related_files,
     load_ratios_from_s3, load_summary_stats_from_s3,
-    load_processing_manifest_from_s3, load_and_merge_spots_from_s3
+    load_processing_manifest_from_s3, load_and_merge_spots_from_s3,
+    find_processing_manifest, detect_tile_structure, extract_tile_suffix
 )
 
-logging.basicConfig(level=logging.INFO)
+
+def load_config():
+    """Load configuration from file with precedence: env var > config file > defaults"""
+    config_paths = [
+        os.getenv('SEESPOT_CONFIG'),
+        str(Path.home() / '.seespot' / 'config.yaml'),
+        str(Path('/etc/seespot/config.yaml')),
+    ]
+    
+    for config_path in config_paths:
+        if config_path and Path(config_path).exists():
+            try:
+                with open(config_path, 'r') as f:
+                    config = yaml.safe_load(f)
+                    logger.info(f"Loaded configuration from: {config_path}")
+                    return config
+            except Exception as e:
+                logger.warning(f"Failed to load config from {config_path}: {e}")
+    
+    # Return defaults if no config file found
+    logger.info("No config file found, using defaults")
+    return {
+        'cache_dir': str(Path.home() / '.seespot' / 'cache'),
+        'server': {'host': '0.0.0.0', 'port': 5555},
+        'aws': {}
+    }
+
+
+# Initialize logging using central utility (idempotent)
+setup_logging(os.getenv("SEE_SPOT_LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
+
+# Load config
+config = load_config()
+
+# Get S3 cache directory from config or environment
+S3_CACHE_BASE = os.getenv('SEESPOT_CACHE_DIR') or config.get('cache_dir', str(Path.home() / '.seespot' / 'cache'))
+S3_CACHE_BASE = Path(S3_CACHE_BASE).expanduser()
 
 app = FastAPI()
 
@@ -37,8 +75,8 @@ app.mount("/static", StaticFiles(directory=static_dir), name="static")
 templates = Jinja2Templates(directory=templates_dir)
 
 # Configuration for the spots data
-S3_BUCKET = "aind-open-data"
-DATA_PREFIX = "HCR_749315_2025-05-08_14-00-00_processed_2025-05-17_22-15-31"  # set default for app load
+S3_BUCKET = os.getenv('SEESPOT_BUCKET') or config.get('aws', {}).get('bucket', 'aind-open-data')
+DATA_PREFIX = None  # No dataset loaded by default - user must select one
 SAMPLE_SIZE = 5000
 
 # In-memory cache for DataFrame to avoid reloading on every request
@@ -48,7 +86,8 @@ df_cache = {
     "target_key": None,
     "processing_manifest": None,
     "spot_channels_from_manifest": None,
-    "sankey_data": None  # Cache Sankey data to avoid recalculation
+    "sankey_data": None,  # Cache Sankey data to avoid recalculation
+    "unmixed_spots_filename": None  # Store unmixed spots filename for neuroglancer logic
 }
 
 
@@ -57,6 +96,7 @@ def get_channel_pairs(df: pl.DataFrame) -> List[Tuple[str, str]]:
     intensity_cols = [col for col in df.columns if col.endswith('_intensity')]
     channels = sorted([col.split('_')[1] for col in intensity_cols])
     return list(itertools.combinations(channels, 2))
+
 
 def calculate_sankey_data_from_polars(df_polars: pl.DataFrame) -> Dict[str, Any]:
     """
@@ -257,6 +297,32 @@ async def get_real_spots_data(
     logger.info(f"Real spots data requested with sample size: {sample_size}, "
                 f"force_refresh: {force_refresh}, valid_spots_only: {valid_spots_only}")
 
+    # Check if a dataset has been selected
+    if DATA_PREFIX is None:
+        logger.info("No dataset selected - returning empty response")
+        return JSONResponse(
+            status_code=200,
+            content={
+                "no_dataset_selected": True,
+                "message": "Please select a dataset from the Dataset Management panel"
+            }
+        )
+
+    # Detect if this is a tile dataset at the beginning - needed for all operations
+    import re
+    tile_pattern = re.compile(r'_X_\d+_Y_\d+_Z_\d+$')
+    tile_folder = None
+    base_dataset_name = DATA_PREFIX
+    
+    if tile_pattern.search(DATA_PREFIX):
+        # Extract tile suffix and reconstruct tile folder name
+        parts = DATA_PREFIX.rsplit('_', 6)  # Split last 6 parts (X_####_Y_####_Z_####)
+        if len(parts) > 1:
+            base_dataset_name = parts[0]
+            tile_suffix = '_'.join(parts[1:])
+            tile_folder = f"Tile_{tile_suffix}"
+            logger.info(f"Detected tile dataset: base={base_dataset_name}, tile={tile_folder}")
+
     # Check if we can use cached DataFrame
     if not force_refresh and df_cache["data"] is not None:
         logger.info(f"Using cached DataFrame from {df_cache['last_loaded']}. Shape: {df_cache['data'].shape}")
@@ -264,23 +330,35 @@ async def get_real_spots_data(
         # Load manifest and channels from cache if available, or re-fetch
         processing_manifest = df_cache.get("processing_manifest")
         spot_channels_from_manifest = df_cache.get("spot_channels_from_manifest")
+        
         if not processing_manifest or not spot_channels_from_manifest:
-            # Construct manifest path and load
-            manifest_key = f"{DATA_PREFIX}/derived/processing_manifest.json"
-            logger.info(f"Attempting to load processing manifest from: s3://{S3_BUCKET}/{manifest_key}")
-            processing_manifest = load_processing_manifest_from_s3(S3_BUCKET, manifest_key)
+            # Find manifest in base dataset folder
+            manifest_key = find_processing_manifest(S3_BUCKET, base_dataset_name)
+            if not manifest_key:
+                logger.error(f"Could not find processing_manifest.json for dataset {base_dataset_name}")
+                spot_channels_from_manifest = []
+            else:
+                logger.info(f"Attempting to load processing manifest from: s3://{S3_BUCKET}/{manifest_key}")
+                processing_manifest = load_processing_manifest_from_s3(S3_BUCKET, manifest_key)
             if processing_manifest and "spot_channels" in processing_manifest:
                 spot_channels_from_manifest = processing_manifest["spot_channels"]
                 df_cache["processing_manifest"] = processing_manifest
                 df_cache["spot_channels_from_manifest"] = spot_channels_from_manifest
                 logger.info(f"Loaded spot channels from manifest: {spot_channels_from_manifest}")
             else:
-                logger.error(f"Could not load processing manifest or find 'spot_channels'. Manifest: {processing_manifest}")
+                logger.error(
+                    f"Could not load processing manifest or find 'spot_channels'. "
+                    f"Manifest: {processing_manifest}"
+                )
                 spot_channels_from_manifest = []
     else:
         # Need to load DataFrame from S3
-        # 1. Load processing manifest to determine paths and channels
-        manifest_key = f"{DATA_PREFIX}/derived/processing_manifest.json"
+        # 1. Load processing manifest from base dataset location
+        manifest_key = find_processing_manifest(S3_BUCKET, base_dataset_name)
+        if not manifest_key:
+            logger.error(f"Could not find processing_manifest.json for dataset {base_dataset_name}.")
+            return JSONResponse(status_code=500, content={'error': 'Failed to find processing manifest'})
+        
         logger.info(f"Attempting to load processing manifest from: s3://{S3_BUCKET}/{manifest_key}")
         processing_manifest = load_processing_manifest_from_s3(S3_BUCKET, manifest_key)
 
@@ -295,15 +373,17 @@ async def get_real_spots_data(
             logger.info(f"Loaded spot channels from manifest: {spot_channels_from_manifest}")
 
         # 2. Find and load the merged data
-        unmixed_spots_prefix = f"{DATA_PREFIX}/image_spot_spectral_unmixing/"
+        
+        unmixed_spots_prefix = f"{base_dataset_name}/image_spot_spectral_unmixing/"
         
         logger.info(f"Loading merged spots data for dataset: {DATA_PREFIX}")
         try:
             df_polars = load_and_merge_spots_from_s3(
-                S3_BUCKET, 
-                DATA_PREFIX, 
+                S3_BUCKET,
+                DATA_PREFIX,
                 unmixed_spots_prefix,
-                valid_spots_only
+                valid_spots_only,
+                tile_folder=tile_folder
             )
             if df_polars is None:
                 logger.error("Failed to load merged DataFrame from S3/cache.")
@@ -330,11 +410,19 @@ async def get_real_spots_data(
     ratios_data = None
     summary_stats_data = None
 
-    related_files_prefix = f"{DATA_PREFIX}/image_spot_spectral_unmixing/"
+    # Use base_dataset_name for related files prefix (tile or regular)
+    related_files_prefix = f"{base_dataset_name}/image_spot_spectral_unmixing/"
+    if tile_folder:
+        related_files_prefix = f"{related_files_prefix}{tile_folder}/"
+    
     unmixed_target_key = find_unmixed_spots_file(
         S3_BUCKET, related_files_prefix, "unmixed_spots_*.pkl"
     )
-    
+    # Store the unmixed spots filename in cache for neuroglancer logic
+    if unmixed_target_key:
+        df_cache["unmixed_spots_filename"] = Path(unmixed_target_key).name
+        logger.info(f"Cached unmixed spots filename: {df_cache['unmixed_spots_filename']}")
+
     if unmixed_target_key:
         related_files = find_related_files(S3_BUCKET, related_files_prefix, unmixed_target_key)
         logger.info(f"Searching for related files in '{related_files_prefix}'. Found: {related_files}")
@@ -400,17 +488,35 @@ async def get_real_spots_data(
     detail_cols = ['spot_id', 'cell_id', 'round', 'z', 'y', 'x']
     available_detail_cols = [col for col in detail_cols if col in plot_df.columns]
     
-    if len(available_detail_cols) > 1:
-        logger.info(f"Creating spot_details with columns: {available_detail_cols}")
+    # Normalize spot_id to int if float to avoid '63.0' style keys
+    if 'spot_id' in plot_df.columns and plot_df['spot_id'].dtype.kind == 'f':
+        if plot_df['spot_id'].isna().any():
+            logger.warning("spot_id column has NaNs before coercion; keys may be inconsistent")
+        logger.info("Coercing float spot_id column to int64 for clean spot_details keys")
+        try:
+            plot_df['spot_id'] = plot_df['spot_id'].astype('int64')
+        except Exception as e:
+            logger.error(f"Failed coercing spot_id to int64: {e}")
+
+    if len(available_detail_cols) >= 1:
+        logger.info(f"Building spot_details from columns: {available_detail_cols}")
         spot_details_df = plot_df[available_detail_cols].copy()
-        
-        spot_details = {
-            str(row['spot_id']): {
-                col: row[col] for col in available_detail_cols if col != 'spot_id'
+        # Ensure spot_id is present
+        if 'spot_id' not in spot_details_df.columns:
+            logger.warning("spot_id column missing; cannot build spot_details")
+            spot_details = {}
+        else:
+            spot_details = {
+                str(int(row['spot_id'])): {
+                    col: row[col] for col in available_detail_cols if col != 'spot_id'
+                }
+                for _, row in spot_details_df.iterrows()
             }
-            for _, row in spot_details_df.iterrows()
-        }
-        logger.info(f"Created spot_details dictionary with {len(spot_details)} entries")
+            logger.info(
+                "spot_details built: %d entries | sample keys: %s",
+                len(spot_details),
+                list(spot_details.keys())[:5]
+            )
     else:
         spot_details = {}
         logger.warning("Could not create spot_details: required columns not found in DataFrame")
@@ -476,12 +582,18 @@ async def get_real_spots_data(
         except Exception as e:
             logger.error(f"Error calculating Sankey data: {e}", exc_info=True)
 
+    # Cache spot_details and fused_s3_paths for use by other endpoints
+    df_cache["spot_details"] = spot_details
+    df_cache["fused_s3_paths"] = fused_s3_paths
+    logger.info(f"Cached {len(spot_details)} spot_details and {len(fused_s3_paths)} fused_s3_paths")
+
     # 11. Build the response
     response = {
         "channel_pairs": channel_pairs,
         "spots_data": data_for_frontend,
         "spot_details": spot_details,
-        "fused_s3_paths": fused_s3_paths
+        "fused_s3_paths": fused_s3_paths,
+        "current_dataset": DATA_PREFIX  # Include current dataset name
     }
 
     if ratios_json:
@@ -500,50 +612,292 @@ async def get_real_spots_data(
 async def create_neuroglancer_link(request: Request):
     """Creates a neuroglancer link with a point annotation at specified coordinates."""
     # Parse the JSON data from the request
+    """const requestData = {
+            fused_s3_paths: fusedS3Paths,
+            position: [details.x, details.y, details.z, 0],
+            point_annotation: [details.x, details.y, details.z, 0.5, 0],
+            cell_id: details.cell_id || 42,
+            spot_id: spotId,
+            annotation_color: "#FFFF00",
+            cross_section_scale: 0.2
+        };"""
     data = await request.json()
-    
     # Extract the parameters from the request
-    fused_s3_paths = data.get("fused_s3_paths")
+    cross_section_scale = data.get("cross_section_scale", "0.135")
+    spot_id = data.get("spot_id")
     position = data.get("position")
     point_annotation = data.get("point_annotation")
-    cell_id = data.get("cell_id", 42)  # Default value if not provided
-    spot_id = data.get("spot_id")
     annotation_color = data.get("annotation_color", "#FFFF00")
-    cross_section_scale = data.get("cross_section_scale", 1.0)
     
     # Input validation
-    if not fused_s3_paths or not position or not point_annotation or not spot_id:
+    if not position or not point_annotation or not spot_id:
         return JSONResponse(
             status_code=400,
-            content={"error": "Missing required parameters: fused_s3_paths, position, point_annotation, or spot_id"}
+            content={"error": "Missing required parameters: position, point_annotation, or spot_id"}
         )
-    
+    # Enhanced logging & dynamic JSON path logic
+    unmixed_spots_filename = df_cache.get("unmixed_spots_filename", "<unknown>")
+    logger.info(
+        "Neuroglancer link request | spot_id=%s | unmixed_spots_file=%s | json_override_env=%s",
+        spot_id,
+        unmixed_spots_filename,
+        os.getenv("SEE_SPOT_NG_JSON_NAME", "<unset>")
+    )
+    logger.debug(
+        "Raw request data keys: %s", ",".join(sorted(data.keys()))
+    )
+    logger.debug(
+        "Position=%s point_annotation=%s annotation_color=%s cross_section_scale=%s",
+        position,
+        point_annotation,
+        annotation_color,
+        cross_section_scale,
+    )
+
+    # Determine JSON file name (env override allowed) and full S3 path
+    ng_json_filename = os.getenv(
+        "SEE_SPOT_NG_JSON_NAME", "phase_correlation_stitching_neuroglancer.json"
+    )
+    ng_json_path = f"s3://{S3_BUCKET}/{DATA_PREFIX}/{ng_json_filename}"
+    s3_key_for_json = f"{DATA_PREFIX}/{ng_json_filename}"  # key relative to bucket
+    logger.info("Constructed Neuroglancer JSON path: %s", ng_json_path)
+
+    # Check existence of JSON on S3 (metadata only) for better diagnostics
+    json_metadata = None
     try:
-        # Import the ng_utils module
-        from see_spot import ng_utils
+        json_metadata = s3_handler.get_object_metadata(
+            s3_key_for_json, bucket_name=S3_BUCKET
+        )
+        if json_metadata:
+            logger.info(
+                "Neuroglancer JSON found on S3 (ContentLength=%s LastModified=%s)",
+                json_metadata.get("ContentLength"),
+                json_metadata.get("LastModified"),
+            )
+        else:
+            logger.warning(
+                "Neuroglancer JSON NOT found on S3: s3://%s/%s", S3_BUCKET, s3_key_for_json
+            )
+    except Exception as meta_err:
+        logger.error(
+            "Error checking Neuroglancer JSON metadata: %s", meta_err, exc_info=True
+        )
+
+    # Decide strategy: prefer JSON-based method when file exists; fall back otherwise
+    use_json_method = json_metadata is not None or "merged" in unmixed_spots_filename.lower()
+    logger.info("Use JSON method decision: %s", use_json_method)
+
+    try:
+        if use_json_method:
+            logger.info(
+                "Attempting create_link_from_json(spot_id=%s, path=%s)",
+                spot_id,
+                ng_json_path,
+            )
+            try:
+                ng_link = ng_utils.create_link_from_json(
+                    ng_json_path=ng_json_path,
+                    position=position,
+                    spot_id=spot_id,
+                    point_annotation=point_annotation,
+                    annotation_color=annotation_color,
+                    spacing=3.0,
+                    cross_section_scale=cross_section_scale,
+                )
+                logger.info("Successfully built Neuroglancer link from JSON")
+            except Exception as json_err:
+                logger.error(
+                    "JSON link creation failed: %s | Falling back to direct method",
+                    json_err,
+                    exc_info=True,
+                )
+                use_json_method = False  # force fallback
+
+        if not use_json_method:
+            logger.info("Falling back to create_link_no_upload() pathway")
+            fused_s3_paths = data.get("fused_s3_paths")
+            cell_id = data.get("cell_id", 42)
+            if not fused_s3_paths:
+                logger.error(
+                    "Missing fused_s3_paths for fallback method; cannot proceed"
+                )
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": "Missing required parameter: fused_s3_paths for fallback Neuroglancer generation",
+                        "attempted_json_path": ng_json_path,
+                        "json_exists": json_metadata is not None,
+                    },
+                )
+            ng_link = ng_utils.create_link_no_upload(
+                fused_s3_paths,
+                annotation_color=annotation_color,
+                cross_section_scale=cross_section_scale,
+                cell_id=cell_id,
+                spot_id=spot_id,
+                position=position,
+                point_annotation=point_annotation,
+            )
+            logger.info(
+                "Successfully built Neuroglancer link via fallback direct method"
+            )
+
+        return {"url": ng_link, "used_json_method": use_json_method}
+    except Exception as e:
+        logger.error("Error creating neuroglancer link: %s", e, exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": f"Failed to create neuroglancer link: {str(e)}",
+                "attempted_json_path": ng_json_path,
+                "json_exists": json_metadata is not None,
+            },
+        )
+
+
+@app.post("/api/create-neuroglancer-multi-annotations")
+async def create_neuroglancer_multi_annotations(request: Request):
+    """Creates a neuroglancer link with multiple point annotations (max 1000)."""
+    try:
+        data = await request.json()
+        
+        # Extract parameters
+        spot_ids = data.get("spot_ids", [])
+        annotation_color = data.get("annotation_color", "#00FF00")  # Green for SeeSpot
+        cross_section_scale = data.get("cross_section_scale", 0.2)
+        layer_name = data.get("layer_name", "SeeSpot")
+        
+        # Validate input
+        if not spot_ids or not isinstance(spot_ids, list):
+            return JSONResponse(
+                status_code=400,
+                content={"error": "spot_ids must be a non-empty list"}
+            )
+        
+        # Limit to 1000 annotations
+        if len(spot_ids) > 1000:
+            logger.warning(f"Limiting annotations from {len(spot_ids)} to 1000")
+            spot_ids = spot_ids[:1000]
+        
+        logger.info(f"Creating Neuroglancer link with {len(spot_ids)} annotations in layer '{layer_name}'")
+        
+        # Get spot details from cache
+        spot_details_cache = df_cache.get("spot_details", {})
+        if not spot_details_cache:
+            logger.error("No spot details in cache")
+            return JSONResponse(
+                status_code=400,
+                content={"error": "No spot details available in cache. Please load data first."}
+            )
+        
+        logger.debug(f"Cache has {len(spot_details_cache)} spot details")
+        logger.debug(f"First few spot_ids from request: {spot_ids[:5]}")
+        logger.debug(f"First few keys in cache: {list(spot_details_cache.keys())[:5]}")
+        
+        # Build annotations list
+        annotations = []
+        missing_spots = []
+        for spot_id in spot_ids:
+            # Try both string and int versions of spot_id
+            details = None
+            if spot_id in spot_details_cache:
+                details = spot_details_cache[spot_id]
+            elif isinstance(spot_id, str) and spot_id.isdigit():
+                # Try converting string to int
+                try:
+                    int_id = int(spot_id)
+                    if int_id in spot_details_cache:
+                        details = spot_details_cache[int_id]
+                except ValueError:
+                    pass
+            elif isinstance(spot_id, int):
+                # Try converting int to string
+                str_id = str(spot_id)
+                if str_id in spot_details_cache:
+                    details = spot_details_cache[str_id]
+            
+            if details:
+                # Create point annotation with [x, y, z, t, 0] format
+                point = [
+                    details.get("x", 0),
+                    details.get("y", 0),
+                    details.get("z", 0),
+                    0,  # t dimension
+                    0   # additional dimension
+                ]
+                annotations.append({
+                    "spot_id": spot_id,
+                    "point": point
+                })
+                logger.debug(f"Found spot {spot_id}: {point}")
+            else:
+                missing_spots.append(spot_id)
+                logger.debug(f"Missing spot {spot_id}")
+        
+        if not annotations:
+            logger.error(f"No valid spot details found. Missing all {len(missing_spots)} spots")
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": "No valid spot details found for provided spot_ids",
+                    "missing_spots": missing_spots[:10],
+                    "cache_sample_keys": list(spot_details_cache.keys())[:10]
+                }
+            )
+        
+        if missing_spots:
+            logger.warning(f"Missing spot details for {len(missing_spots)} spots: {missing_spots[:10]}...")
+        
+        # Get fused S3 paths from cache
+        fused_s3_paths = df_cache.get("fused_s3_paths", {})
+        if not fused_s3_paths:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "No fused S3 paths available in cache. Please load data first."}
+            )
+        
+        # Calculate center position from all annotations
+        if annotations:
+            avg_x = sum(a["point"][0] for a in annotations) / len(annotations)
+            avg_y = sum(a["point"][1] for a in annotations) / len(annotations)
+            avg_z = sum(a["point"][2] for a in annotations) / len(annotations)
+            position = [avg_x, avg_y, avg_z, 0]
+        else:
+            position = None
+        
+        logger.info(f"Center position: {position}")
         
         # Create the neuroglancer link
-        ng_link = ng_utils.create_link_no_upload(
-            fused_s3_paths,
-            annotation_color=annotation_color,
-            cross_section_scale=cross_section_scale,
-            cell_id=cell_id,
-            spot_id=spot_id,
+        ng_link = ng_utils.create_link_with_multiple_annotations(
+            fused_s3_paths=fused_s3_paths,
+            annotations=annotations,
             position=position,
-            point_annotation=point_annotation
+            layer_name=layer_name,
+            annotation_color=annotation_color,
+            spacing=3.0,
+            cross_section_scale=cross_section_scale
         )
         
-        return {"url": ng_link}
+        logger.info(f"Successfully created Neuroglancer link with {len(annotations)} annotations")
+        
+        return {
+            "url": ng_link,
+            "annotation_count": len(annotations),
+            "missing_spots": len(missing_spots),
+            "layer_name": layer_name
+        }
+        
     except Exception as e:
-        logger.error(f"Error creating neuroglancer link: {str(e)}")
+        logger.error(f"Error creating multi-annotation neuroglancer link: {e}", exc_info=True)
         return JSONResponse(
             status_code=500,
             content={"error": f"Failed to create neuroglancer link: {str(e)}"}
         )
 
+
 @app.get("/api/datasets")
 async def list_datasets():
-    """List all available datasets in the local cache."""
+    """List all available datasets in the local cache, including virtual tile datasets."""
     try:
         cache_path = Path("/s3-cache") / S3_BUCKET
         datasets = []
@@ -555,15 +909,18 @@ async def list_datasets():
                     stat = dataset_dir.stat()
                     creation_time = datetime.fromtimestamp(stat.st_mtime)
                     
-                    # Check if dataset has the required structure
+                    # Check if dataset has data - for virtual tile datasets, check for parquet file
+                    parquet_file = dataset_dir / f"{dataset_dir.name}.parquet"
                     spots_dir = dataset_dir / "image_spot_spectral_unmixing"
-                    has_data = spots_dir.exists()
+                    
+                    # Dataset has data if it has either the spots directory OR a parquet file
+                    has_data = spots_dir.exists() or parquet_file.exists()
                     
                     datasets.append({
                         "name": dataset_dir.name,
                         "creation_date": creation_time.strftime("%Y-%m-%d %H:%M:%S"),
                         "has_data": has_data,
-                        "is_current": dataset_dir.name == DATA_PREFIX
+                        "is_current": DATA_PREFIX is not None and dataset_dir.name == DATA_PREFIX
                     })
         
         # Sort by creation date (newest first)
@@ -575,9 +932,10 @@ async def list_datasets():
         logger.error(f"Error listing datasets: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
 
+
 @app.post("/api/datasets/download")
 async def download_dataset(request: Request):
-    """Download a dataset from S3 to local cache."""
+    """Download a dataset from S3 to local cache. Detects tiled datasets and creates virtual entries."""
     try:
         data = await request.json()
         dataset_name = data.get("dataset_name")
@@ -585,22 +943,40 @@ async def download_dataset(request: Request):
         if not dataset_name:
             return JSONResponse(status_code=400, content={"error": "Dataset name is required"})
         
-        # Check if dataset exists on S3 by looking for the processing manifest
-        manifest_key = f"{dataset_name}/derived/processing_manifest.json"
-        
-        logger.info(f"Checking if dataset exists: s3://{S3_BUCKET}/{manifest_key}")
-        
-        # Try to get the manifest to verify the dataset exists
-        manifest_content = s3_handler.get_object(key=manifest_key, bucket_name=S3_BUCKET)
-        
-        if manifest_content is None:
+        # Check if this is already a virtual tile dataset (ends with _X_####_Y_####_Z_####)
+        import re
+        tile_pattern = re.compile(r'_X_\d+_Y_\d+_Z_\d+$')
+        if tile_pattern.search(dataset_name):
             return JSONResponse(
-                status_code=404, 
+                status_code=400,
                 content={
-                    "error": f"Dataset not found on S3",
-                    "checked_path": f"s3://{S3_BUCKET}/{manifest_key}"
+                    "error": (
+                        f"Cannot download virtual tile dataset '{dataset_name}'. "
+                        "Please download the base dataset instead."
+                    ),
+                    "hint": (
+                        "Remove the tile suffix "
+                        "(e.g., '_X_0000_Y_0000_Z_0000') and try again."
+                    )
                 }
             )
+        
+        # Check if dataset exists on S3 by looking for the processing manifest
+        manifest_key = find_processing_manifest(S3_BUCKET, dataset_name)
+        
+        if not manifest_key:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "error": "Dataset not found on S3 - processing_manifest.json not found",
+                    "checked_paths": [
+                        f"s3://{S3_BUCKET}/{dataset_name}/processing_manifest.json",
+                        f"s3://{S3_BUCKET}/{dataset_name}/derived/processing_manifest.json"
+                    ]
+                }
+            )
+        
+        logger.info(f"Found dataset manifest at: s3://{S3_BUCKET}/{manifest_key}")
         
         # Download the processing manifest first
         manifest_local_path = s3_handler.download_file(
@@ -612,67 +988,107 @@ async def download_dataset(request: Request):
         if manifest_local_path is None:
             return JSONResponse(status_code=500, content={"error": "Failed to download processing manifest"})
         
-        # Download the unmixed spots file (for merging and related files)
-        spots_key = f"{dataset_name}/image_spot_spectral_unmixing/"
-        spots_file = find_unmixed_spots_file(S3_BUCKET, spots_key, "unmixed_spots_*.pkl")
-        
-        if not spots_file:
-            return JSONResponse(
-                status_code=404, 
-                content={
-                    "error": "Spots data file not found",
-                    "checked_path": f"s3://{S3_BUCKET}/{spots_key}unmixed_spots_*.pkl"
-                }
-            )
-        
-        # Try to create the merged parquet file by calling our new merge function
-        try:
-            merged_df = load_and_merge_spots_from_s3(S3_BUCKET, dataset_name, spots_key)
-            if merged_df is not None:
-                logger.info(f"Successfully created merged parquet file for dataset {dataset_name}")
-            else:
-                logger.warning(f"Could not create merged parquet file for dataset {dataset_name}")
-        except Exception as e:
-            logger.warning(f"Error creating merged parquet file: {e}")
-            # Continue anyway - the individual files will still be available
-        
-        # Try to download related files (ratios and summary stats)
-        related_files = find_related_files(S3_BUCKET, spots_key, spots_file)
-        
         downloaded_files = [str(manifest_local_path)]
         
-        # Add the parquet file to downloaded files if it was created
-        parquet_file = Path("/s3-cache") / S3_BUCKET / dataset_name / f"{dataset_name}.parquet"
-        if parquet_file.exists():
-            downloaded_files.append(str(parquet_file))
+        # Check for tile structure
+        tile_folders = detect_tile_structure(S3_BUCKET, dataset_name)
         
-        if related_files['ratios']:
-            ratios_local_path = s3_handler.download_file(
-                key=related_files['ratios'],
-                bucket_name=S3_BUCKET,
-                use_cache=True
-            )
-            if ratios_local_path:
-                downloaded_files.append(str(ratios_local_path))
-        
-        if related_files['summary_stats']:
-            stats_local_path = s3_handler.download_file(
-                key=related_files['summary_stats'],
-                bucket_name=S3_BUCKET,
-                use_cache=True
-            )
-            if stats_local_path:
-                downloaded_files.append(str(stats_local_path))
-        
-        return {
-            "success": True,
-            "dataset_name": dataset_name,
-            "downloaded_files": downloaded_files
-        }
+        if tile_folders:
+            # Tiled dataset - create virtual datasets for each tile
+            logger.info(f"Detected {len(tile_folders)} tiles in dataset {dataset_name}")
+            
+            for tile_folder in tile_folders:
+                tile_suffix = extract_tile_suffix(tile_folder)
+                virtual_dataset_name = f"{dataset_name}_{tile_suffix}"
+                spots_key = f"{dataset_name}/image_spot_spectral_unmixing/"
+                
+                logger.info(f"Creating virtual tile dataset: {virtual_dataset_name}")
+                
+                try:
+                    # Load and merge this tile's data
+                    merged_df = load_and_merge_spots_from_s3(
+                        S3_BUCKET, dataset_name, spots_key, tile_folder=tile_folder
+                    )
+                    if merged_df is not None:
+                        logger.info(f"Successfully created parquet for tile {virtual_dataset_name}")
+                        parquet_path = (
+                            Path("/s3-cache") / S3_BUCKET / virtual_dataset_name /
+                            f"{virtual_dataset_name}.parquet"
+                        )
+                        if parquet_path.exists():
+                            downloaded_files.append(str(parquet_path))
+                    else:
+                        logger.warning(f"Could not create parquet for tile {virtual_dataset_name}")
+                except Exception as e:
+                    logger.error(f"Error processing tile {tile_folder}: {e}", exc_info=True)
+            
+            return {
+                "success": True,
+                "dataset_name": dataset_name,
+                "is_tiled": True,
+                "tile_count": len(tile_folders),
+                "virtual_datasets": [f"{dataset_name}_{extract_tile_suffix(tf)}" for tf in tile_folders],
+                "downloaded_files": downloaded_files
+            }
+        else:
+            # Regular fused dataset - original behavior
+            spots_key = f"{dataset_name}/image_spot_spectral_unmixing/"
+            spots_file = find_unmixed_spots_file(S3_BUCKET, spots_key, "unmixed_spots_*.pkl")
+            
+            if not spots_file:
+                return JSONResponse(
+                    status_code=404,
+                    content={
+                        "error": "Spots data file not found",
+                        "checked_path": f"s3://{S3_BUCKET}/{spots_key}unmixed_spots_*.pkl"}
+                )
+            
+            # Create the merged parquet file
+            try:
+                merged_df = load_and_merge_spots_from_s3(S3_BUCKET, dataset_name, spots_key)
+                if merged_df is not None:
+                    logger.info(f"Successfully created merged parquet file for dataset {dataset_name}")
+                else:
+                    logger.warning(f"Could not create merged parquet file for dataset {dataset_name}")
+            except Exception as e:
+                logger.warning(f"Error creating merged parquet file: {e}")
+            
+            # Download related files (ratios and summary stats)
+            related_files = find_related_files(S3_BUCKET, spots_key, spots_file)
+            
+            parquet_file = Path("/s3-cache") / S3_BUCKET / dataset_name / f"{dataset_name}.parquet"
+            if parquet_file.exists():
+                downloaded_files.append(str(parquet_file))
+            
+            if related_files['ratios']:
+                ratios_local_path = s3_handler.download_file(
+                    key=related_files['ratios'],
+                    bucket_name=S3_BUCKET,
+                    use_cache=True
+                )
+                if ratios_local_path:
+                    downloaded_files.append(str(ratios_local_path))
+            
+            if related_files['summary_stats']:
+                stats_local_path = s3_handler.download_file(
+                    key=related_files['summary_stats'],
+                    bucket_name=S3_BUCKET,
+                    use_cache=True
+                )
+                if stats_local_path:
+                    downloaded_files.append(str(stats_local_path))
+            
+            return {
+                "success": True,
+                "dataset_name": dataset_name,
+                "is_tiled": False,
+                "downloaded_files": downloaded_files
+            }
     
     except Exception as e:
         logger.error(f"Error downloading dataset: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
+
 
 @app.post("/api/datasets/set-active")
 async def set_active_dataset(request: Request):
@@ -699,6 +1115,9 @@ async def set_active_dataset(request: Request):
         df_cache["target_key"] = None
         df_cache["processing_manifest"] = None
         df_cache["spot_channels_from_manifest"] = None
+        df_cache["spot_details"] = None
+        df_cache["fused_s3_paths"] = None
+        df_cache["sankey_data"] = None
         
         logger.info(f"Active dataset changed to: {dataset_name}")
         
@@ -712,11 +1131,16 @@ async def set_active_dataset(request: Request):
         logger.error(f"Error setting active dataset: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
 
+
 @app.get("/")
 @app.get("/unmixed-spots")
 async def unmixed_spots_page(request: Request):
     logger.info("Unmixed spots page accessed")
-    return templates.TemplateResponse("unmixed_spots.html", {"request": request})
+    return templates.TemplateResponse("unmixed_spots.html", {"request": request, "version": __version__})
+
 
 if __name__ == '__main__':
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Get host and port from environment or config
+    host = os.getenv('SEESPOT_HOST') or config.get('server', {}).get('host', '0.0.0.0')
+    port = int(os.getenv('SEESPOT_PORT') or config.get('server', {}).get('port', 5555))
+    uvicorn.run(app, host=host, port=port)

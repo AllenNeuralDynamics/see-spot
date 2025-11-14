@@ -8,4 +8,5 @@ pathlib
 python-multipart
 s3fs
 zarr
+pyyaml
 aind-ng-link @ git+https://github.com/AllenNeuralDynamics/aind-ng-link.git
