@@ -545,6 +545,11 @@ async def get_real_spots_data(
         except Exception as e:
             logger.error(f"Error calculating Sankey data: {e}", exc_info=True)
 
+    # Cache spot_details and fused_s3_paths for use by other endpoints
+    df_cache["spot_details"] = spot_details
+    df_cache["fused_s3_paths"] = fused_s3_paths
+    logger.info(f"Cached {len(spot_details)} spot_details and {len(fused_s3_paths)} fused_s3_paths")
+
     # 11. Build the response
     response = {
         "channel_pairs": channel_pairs,
@@ -710,6 +715,146 @@ async def create_neuroglancer_link(request: Request):
                 "attempted_json_path": ng_json_path,
                 "json_exists": json_metadata is not None,
             },
+        )
+
+
+@app.post("/api/create-neuroglancer-multi-annotations")
+async def create_neuroglancer_multi_annotations(request: Request):
+    """Creates a neuroglancer link with multiple point annotations (max 1000)."""
+    try:
+        data = await request.json()
+        
+        # Extract parameters
+        spot_ids = data.get("spot_ids", [])
+        annotation_color = data.get("annotation_color", "#00FF00")  # Green for SeeSpot
+        cross_section_scale = data.get("cross_section_scale", 0.2)
+        layer_name = data.get("layer_name", "SeeSpot")
+        
+        # Validate input
+        if not spot_ids or not isinstance(spot_ids, list):
+            return JSONResponse(
+                status_code=400,
+                content={"error": "spot_ids must be a non-empty list"}
+            )
+        
+        # Limit to 1000 annotations
+        if len(spot_ids) > 1000:
+            logger.warning(f"Limiting annotations from {len(spot_ids)} to 1000")
+            spot_ids = spot_ids[:1000]
+        
+        logger.info(f"Creating Neuroglancer link with {len(spot_ids)} annotations in layer '{layer_name}'")
+        
+        # Get spot details from cache
+        spot_details_cache = df_cache.get("spot_details", {})
+        if not spot_details_cache:
+            logger.error("No spot details in cache")
+            return JSONResponse(
+                status_code=400,
+                content={"error": "No spot details available in cache. Please load data first."}
+            )
+        
+        logger.debug(f"Cache has {len(spot_details_cache)} spot details")
+        logger.debug(f"First few spot_ids from request: {spot_ids[:5]}")
+        logger.debug(f"First few keys in cache: {list(spot_details_cache.keys())[:5]}")
+        
+        # Build annotations list
+        annotations = []
+        missing_spots = []
+        for spot_id in spot_ids:
+            # Try both string and int versions of spot_id
+            details = None
+            if spot_id in spot_details_cache:
+                details = spot_details_cache[spot_id]
+            elif isinstance(spot_id, str) and spot_id.isdigit():
+                # Try converting string to int
+                try:
+                    int_id = int(spot_id)
+                    if int_id in spot_details_cache:
+                        details = spot_details_cache[int_id]
+                except ValueError:
+                    pass
+            elif isinstance(spot_id, int):
+                # Try converting int to string
+                str_id = str(spot_id)
+                if str_id in spot_details_cache:
+                    details = spot_details_cache[str_id]
+            
+            if details:
+                # Create point annotation with [x, y, z, t, 0] format
+                point = [
+                    details.get("x", 0),
+                    details.get("y", 0),
+                    details.get("z", 0),
+                    0,  # t dimension
+                    0   # additional dimension
+                ]
+                annotations.append({
+                    "spot_id": spot_id,
+                    "point": point
+                })
+                logger.debug(f"Found spot {spot_id}: {point}")
+            else:
+                missing_spots.append(spot_id)
+                logger.debug(f"Missing spot {spot_id}")
+        
+        if not annotations:
+            logger.error(f"No valid spot details found. Missing all {len(missing_spots)} spots")
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": "No valid spot details found for provided spot_ids",
+                    "missing_spots": missing_spots[:10],
+                    "cache_sample_keys": list(spot_details_cache.keys())[:10]
+                }
+            )
+        
+        if missing_spots:
+            logger.warning(f"Missing spot details for {len(missing_spots)} spots: {missing_spots[:10]}...")
+        
+        # Get fused S3 paths from cache
+        fused_s3_paths = df_cache.get("fused_s3_paths", {})
+        if not fused_s3_paths:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "No fused S3 paths available in cache. Please load data first."}
+            )
+        
+        # Calculate center position from all annotations
+        if annotations:
+            avg_x = sum(a["point"][0] for a in annotations) / len(annotations)
+            avg_y = sum(a["point"][1] for a in annotations) / len(annotations)
+            avg_z = sum(a["point"][2] for a in annotations) / len(annotations)
+            position = [avg_x, avg_y, avg_z, 0]
+        else:
+            position = None
+        
+        logger.info(f"Center position: {position}")
+        
+        # Create the neuroglancer link
+        ng_link = ng_utils.create_link_with_multiple_annotations(
+            fused_s3_paths=fused_s3_paths,
+            annotations=annotations,
+            position=position,
+            layer_name=layer_name,
+            annotation_color=annotation_color,
+            spacing=3.0,
+            cross_section_scale=cross_section_scale
+        )
+        
+        logger.info(f"Successfully created Neuroglancer link with {len(annotations)} annotations")
+        
+        return {
+            "url": ng_link,
+            "annotation_count": len(annotations),
+            "missing_spots": len(missing_spots),
+            "layer_name": layer_name
+        }
+        
+    except Exception as e:
+        logger.error(f"Error creating multi-annotation neuroglancer link: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Failed to create neuroglancer link: {str(e)}"}
         )
 
 
@@ -933,6 +1078,9 @@ async def set_active_dataset(request: Request):
         df_cache["target_key"] = None
         df_cache["processing_manifest"] = None
         df_cache["spot_channels_from_manifest"] = None
+        df_cache["spot_details"] = None
+        df_cache["fused_s3_paths"] = None
+        df_cache["sankey_data"] = None
         
         logger.info(f"Active dataset changed to: {dataset_name}")
         

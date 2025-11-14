@@ -494,3 +494,181 @@ def wavelength_to_hex_pure_colours(wavelength: int) -> int:
         if wavelength < ub:  # Exclusive
             return hex_val
     return hex_val  # hex_val is set to the last color in for loop
+
+
+def create_link_with_multiple_annotations(
+    fused_s3_paths,
+    annotations,
+    position=None,
+    layer_name="SeeSpot",
+    annotation_color="#00FF00",
+    spacing=3.0,
+    cross_section_scale=1.0,
+    resolution_zyx=None,
+    max_dr=1200,
+    opacity=1.0,
+    blend="additive",
+    output_folder=None,
+):
+    """
+    Create a Neuroglancer link with multiple point annotations.
+
+    Parameters:
+    -----------
+    fused_s3_paths (dict or list): Dictionary mapping channel names to S3 paths, or list of S3 paths
+    annotations (list): List of annotation dicts, each containing:
+        - spot_id: Unique identifier for the spot
+        - point: Coordinates [x, y, z, t, ...] for the annotation
+    position (list, optional): Initial position to view [x, y, z, t]. If None, uses first annotation
+    layer_name (str): Name for the annotation layer. Default: "SeeSpot"
+    annotation_color (str): Hex color for annotations. Default: "#00FF00" (green)
+    spacing (float): Spacing for annotations in cross-section view. Default: 3.0
+    cross_section_scale (float): Scale for cross-section view. Default: 1.0
+    resolution_zyx (list, optional): Resolution in z,y,x order. If None, reads from zarr
+    max_dr (int): Maximum dynamic range for shader controls. Default: 1200
+    opacity (float): Opacity value for the layer. Default: 1.0
+    blend (str): Blending mode for the layer. Default: "additive"
+    output_folder (str, optional): Output folder path
+
+    Returns:
+    --------
+    str: Direct Neuroglancer URL with multiple annotations
+    """
+    # Convert fused_s3_paths to list if it's a dict
+    if isinstance(fused_s3_paths, dict):
+        fused_s3_path = list(fused_s3_paths.values())
+    elif isinstance(fused_s3_paths, str):
+        fused_s3_path = [fused_s3_paths]
+    else:
+        fused_s3_path = fused_s3_paths
+
+    # If resolution not provided, try to read from first zarr file
+    if resolution_zyx is None:
+        try:
+            resolution_zyx = read_zarr_resolution_boto(fused_s3_path[0])
+            print(f"Found resolution from zarr: {resolution_zyx}")
+        except Exception as e:
+            print(
+                f"Warning: Could not read resolution from zarr file: {str(e)}"
+            )
+            # Provide a default resolution if we can't read it
+            resolution_zyx = [1.0, 1.0, 1.0]
+            print(f"Using default resolution: {resolution_zyx}")
+
+    output_dimensions = {
+        "x": {"voxel_size": resolution_zyx[2], "unit": "microns"},
+        "y": {"voxel_size": resolution_zyx[1], "unit": "microns"},
+        "z": {"voxel_size": resolution_zyx[0], "unit": "microns"},
+        "c'": {"voxel_size": 1, "unit": ""},
+        "t": {"voxel_size": 0.001, "unit": "seconds"},
+    }
+
+    # Initialize layers list
+    layers = []
+
+    # Process each fused path to create image layers
+    for idx, fused_path in enumerate(fused_s3_path):
+        # Extract channel number from fused path
+        pattern = r"(ch|CH|channel)_(\d+)"
+        match = re.search(pattern, fused_path)
+        if not match:
+            raise ValueError(
+                f"Could not extract channel number from path: {fused_path}"
+            )
+
+        channel = int(match.group(2))
+        hex_val = wavelength_to_hex_pure_colours(channel)
+        hex_str = f"#{hex_val:06x}"
+
+        # Add image layer
+        image_layer = {
+            "type": "image",
+            "source": fused_path,
+            "channel": 0,
+            "shaderControls": {"normalized": {"range": [90, max_dr]}},
+            "shader": {
+                "color": hex_str,
+                "emitter": "RGB",
+                "vec": "vec3",
+            },
+            "localPosition": [0.5],
+            "visible": True,
+            "opacity": opacity,
+            "name": f"CH_{channel}",
+            "blend": blend,
+        }
+        layers.append(image_layer)
+
+    # Create annotation layer with multiple points
+    annotation_layer = {
+        "type": "annotation",
+        "name": layer_name,
+        "tab": "annotations",
+        "visible": True,
+        "annotationColor": annotation_color,
+        "crossSectionAnnotationSpacing": spacing,
+        "projectionAnnotationSpacing": 10,
+        "tool": "annotatePoint",
+        "annotations": []
+    }
+
+    # Add all annotations to the layer
+    for annot in annotations:
+        annotation = {
+            "type": "point",
+            "id": str(annot["spot_id"]),
+            "point": annot["point"],
+        }
+        annotation_layer["annotations"].append(annotation)
+
+    print(f"Created annotation layer '{layer_name}' with {len(annotations)} points")
+
+    # Use the first annotation's coordinates as the position if no position is specified
+    if position is None and len(annotations) > 0:
+        first_point = annotations[0]["point"]
+        position = first_point[:4] if len(first_point) >= 4 else first_point + [0] * (4 - len(first_point))
+
+    # Set input config with dimensions from resolution_zyx
+    input_config = {
+        "dimensions": output_dimensions,
+        "layers": layers,
+        "showScaleBar": False,
+        "showAxisLines": False,
+    }
+
+    # Extract bucket and dataset from first fused path
+    parts = fused_s3_path[0].split("/")
+    bucket_name = parts[2]
+    dataset_name = parts[3]
+
+    # Set up output folder
+    if output_folder is None:
+        cd = os.getcwd()
+        output_folder = f"{cd}/{dataset_name}/"
+    if not pathlib.Path(output_folder).exists():
+        pathlib.Path(output_folder).mkdir(parents=True, exist_ok=True)
+
+    # Create JSON file name
+    json_name = f"multi_annotation_ng_link_{len(annotations)}_spots.json"
+
+    # Generate the Neuroglancer state
+    neuroglancer_link = NgState(
+        input_config,
+        "s3",
+        bucket_name,
+        output_folder,
+        dataset_name=pathlib.Path(output_folder).stem,
+        base_url="https://neuroglancer-demo.appspot.com",
+        json_name=json_name,
+    )
+
+    state_dict = neuroglancer_link.state
+
+    # Add annotation layer and other state properties
+    state_dict["layers"].append(annotation_layer)
+    state_dict["crossSectionScale"] = cross_section_scale
+    state_dict["position"] = position
+
+    direct_url = create_direct_neuroglancer_url(state_dict)
+
+    return direct_url

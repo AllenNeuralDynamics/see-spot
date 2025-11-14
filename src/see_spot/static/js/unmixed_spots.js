@@ -5,6 +5,7 @@ document.addEventListener('DOMContentLoaded', function () {
     const clearButton = document.getElementById('clear_spots_button');
     const addLassoButton = document.getElementById('add_lasso_selection_button');
     const exportCsvButton = document.getElementById('export_csv_button');
+    const annotateNeuroglancerButton = document.getElementById('annotate_neuroglancer_button');
     const labelInput = document.getElementById('label_input');
     const activeLabelDisplay = document.getElementById('active_label_display');
     const prevChannelButton = document.getElementById('prev_channel_pair');
@@ -1758,6 +1759,86 @@ document.addEventListener('DOMContentLoaded', function () {
             return;
         }
         exportTableToCSV('unmixed_spots_selection.csv');
+    });
+
+    // Annotate Neuroglancer Functionality
+    annotateNeuroglancerButton.addEventListener('click', function() {
+        if (spotsTableBody.rows.length === 0) {
+            alert("Table is empty. Add some spots first.");
+            return;
+        }
+        
+        // Collect spot IDs from the table
+        const spotIds = [];
+        for (let i = 0; i < spotsTableBody.rows.length; i++) {
+            const row = spotsTableBody.rows[i];
+            const spotId = row.cells[0].textContent; // First column is Spot ID
+            spotIds.push(spotId);
+        }
+        
+        // Limit to 1000 annotations
+        if (spotIds.length > 1000) {
+            if (!confirm(`You have ${spotIds.length} spots selected. Only the first 1000 will be annotated in Neuroglancer. Continue?`)) {
+                return;
+            }
+        }
+        
+        console.log(`Creating Neuroglancer link with ${spotIds.length} annotations`);
+        
+        // Disable button and show loading state
+        annotateNeuroglancerButton.disabled = true;
+        annotateNeuroglancerButton.textContent = 'Creating link...';
+        
+        // Prepare request data
+        const requestData = {
+            spot_ids: spotIds,
+            annotation_color: "#00FF00",  // Green for SeeSpot
+            cross_section_scale: 0.2,
+            layer_name: "SeeSpot"
+        };
+        
+        // Make API request
+        fetch('/api/create-neuroglancer-multi-annotations', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(requestData)
+        })
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`HTTP error! Status: ${response.status}`);
+            }
+            return response.json();
+        })
+        .then(data => {
+            if (data.url) {
+                console.log(`Neuroglancer link created with ${data.annotation_count} annotations`);
+                
+                // Show success message
+                const message = `Created Neuroglancer link with ${data.annotation_count} annotations!`;
+                if (data.missing_spots > 0) {
+                    alert(`${message}\n\nNote: ${data.missing_spots} spots were missing coordinate data and were skipped.`);
+                } else {
+                    alert(message);
+                }
+                
+                // Open URL in new tab
+                window.open(data.url, '_blank');
+            } else {
+                console.error("No URL returned from API");
+                alert("Failed to create Neuroglancer link. No URL returned.");
+            }
+        })
+        .catch(error => {
+            console.error("Error creating multi-annotation neuroglancer link:", error);
+            alert(`Error creating Neuroglancer link: ${error.message}`);
+        })
+        .finally(() => {
+            // Re-enable button and restore text
+            annotateNeuroglancerButton.disabled = false;
+            annotateNeuroglancerButton.textContent = 'Annotate Neuroglancer';
+        });
     });
 
     function escapeCsvCell(cellData) {
