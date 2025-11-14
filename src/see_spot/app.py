@@ -38,18 +38,21 @@ def load_config():
         str(Path('/etc/seespot/config.yaml')),
     ]
     
+    # Get a logger for this function (avoid using module-level logger during import)
+    config_logger = logging.getLogger(__name__)
+    
     for config_path in config_paths:
         if config_path and Path(config_path).exists():
             try:
                 with open(config_path, 'r') as f:
-                    config = yaml.safe_load(f)
-                    logger.info(f"Loaded configuration from: {config_path}")
-                    return config
+                    loaded_config = yaml.safe_load(f)
+                    config_logger.info(f"Loaded configuration from: {config_path}")
+                    return loaded_config
             except Exception as e:
-                logger.warning(f"Failed to load config from {config_path}: {e}")
+                config_logger.warning(f"Failed to load config from {config_path}: {e}")
     
     # Return defaults if no config file found
-    logger.info("No config file found, using defaults")
+    config_logger.info("No config file found, using defaults")
     return {
         'cache_dir': str(Path.home() / '.seespot' / 'cache'),
         'server': {'host': '0.0.0.0', 'port': 5555},
