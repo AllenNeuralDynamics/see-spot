@@ -12,6 +12,7 @@ from pathlib import Path
 import polars as pl
 import itertools
 from typing import List, Tuple, Dict, Any
+import yaml
 
 # Import your modules
 from see_spot.s3_handler import s3_handler
@@ -23,9 +24,44 @@ from see_spot.s3_utils import (
     find_processing_manifest, detect_tile_structure, extract_tile_suffix
 )
 
+
+def load_config():
+    """Load configuration from file with precedence: env var > config file > defaults"""
+    config_paths = [
+        os.getenv('SEESPOT_CONFIG'),
+        str(Path.home() / '.seespot' / 'config.yaml'),
+        str(Path('/etc/seespot/config.yaml')),
+    ]
+    
+    for config_path in config_paths:
+        if config_path and Path(config_path).exists():
+            try:
+                with open(config_path, 'r') as f:
+                    config = yaml.safe_load(f)
+                    logger.info(f"Loaded configuration from: {config_path}")
+                    return config
+            except Exception as e:
+                logger.warning(f"Failed to load config from {config_path}: {e}")
+    
+    # Return defaults if no config file found
+    logger.info("No config file found, using defaults")
+    return {
+        'cache_dir': str(Path.home() / '.seespot' / 'cache'),
+        'server': {'host': '0.0.0.0', 'port': 5555},
+        'aws': {}
+    }
+
+
 # Initialize logging using central utility (idempotent)
 setup_logging(os.getenv("SEE_SPOT_LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
+
+# Load config
+config = load_config()
+
+# Get S3 cache directory from config or environment
+S3_CACHE_BASE = os.getenv('SEESPOT_CACHE_DIR') or config.get('cache_dir', str(Path.home() / '.seespot' / 'cache'))
+S3_CACHE_BASE = Path(S3_CACHE_BASE).expanduser()
 
 app = FastAPI()
 
@@ -39,7 +75,7 @@ app.mount("/static", StaticFiles(directory=static_dir), name="static")
 templates = Jinja2Templates(directory=templates_dir)
 
 # Configuration for the spots data
-S3_BUCKET = "aind-open-data"
+S3_BUCKET = os.getenv('SEESPOT_BUCKET') or config.get('aws', {}).get('bucket', 'aind-open-data')
 DATA_PREFIX = None  # No dataset loaded by default - user must select one
 SAMPLE_SIZE = 5000
 
@@ -1104,4 +1140,7 @@ async def unmixed_spots_page(request: Request):
 
 
 if __name__ == '__main__':
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Get host and port from environment or config
+    host = os.getenv('SEESPOT_HOST') or config.get('server', {}).get('host', '0.0.0.0')
+    port = int(os.getenv('SEESPOT_PORT') or config.get('server', {}).get('port', 5555))
+    uvicorn.run(app, host=host, port=port)

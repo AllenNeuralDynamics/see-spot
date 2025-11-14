@@ -7,14 +7,39 @@
 ![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen?logo=codecov)
 ![Python](https://img.shields.io/badge/python->=3.10-blue?logo=python)
 
+## Quick Start
+
+### Installation
+```bash
+# Clone repository
+git clone https://github.com/AllenNeuralDynamics/see-spot.git
+cd see-spot
+
+# Run installer (uses defaults: port 5555, cache at ~/.seespot/cache)
+./install.sh
+
+# Or customize settings interactively
+./install.sh --interactive
+```
+
+### Launch
+```bash
+# Start the server
+seespot start
+
+# Access at http://localhost:5555
+```
+
+For detailed installation instructions, AWS credentials setup, and troubleshooting, see [INSTALL.md](INSTALL.md).
+
 ## App UI
 ![Spot Visualization](img/seespot-app-v.png)
 *Interactive dashboard showing spot channel analysis with Sankey flow diagram, scatter plot, and summary statistics*
 
-## start-up (local)
+## Development Setup
 + Install
   + `uv sync`
-+ Launch: 
++ Launch with auto-reload: 
 ```bash
 cd /home/matt.davis/code/see-spot && source .venv/bin/activate && cd src && uvicorn see_spot.app:app --host 0.0.0.0 --port 9999 --reload
 ```

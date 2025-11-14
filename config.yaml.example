@@ -1,0 +1,35 @@
+# SeeSpot Configuration Example
+# Copy this to ~/.seespot/config.yaml and customize as needed
+
+# Directory where S3 data will be cached locally
+# This should have at least 50GB of free space
+cache_dir: ~/.seespot/cache
+
+# Server configuration
+server:
+  # Host address to bind to
+  # Use 0.0.0.0 to allow external connections
+  # Use 127.0.0.1 for localhost only
+  host: 0.0.0.0
+  
+  # Port number for the web server
+  port: 5555
+
+# AWS configuration (optional)
+aws:
+  # AWS profile name from ~/.aws/credentials
+  # If not specified, uses default profile or environment variables
+  # profile: default
+  
+  # AWS region
+  # If not specified, uses AWS_DEFAULT_REGION or us-west-2
+  # region: us-west-2
+  
+  # S3 bucket containing the data
+  # Default: aind-open-data
+  # bucket: aind-open-data
+
+# Logging configuration (optional)
+# logging:
+#   level: INFO  # Options: DEBUG, INFO, WARNING, ERROR
+#   file: ~/.seespot/seespot.log
