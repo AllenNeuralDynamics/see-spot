@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Unmixed Spots Visualization</title>
+    <title>SeeSpot - HCR spot visualization</title>
     <!-- Include ECharts -->
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
     <!-- Include DataTables -->
@@ -286,6 +286,7 @@
             width: 100%;
             border-collapse: collapse;
             font-size: 12px;
+            table-layout: fixed;
         }
         
         #dataset_table th {
@@ -301,6 +302,10 @@
         #dataset_table td {
             padding: 6px 8px;
             border-bottom: 1px solid #eee;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+            white-space: normal;
+            overflow: hidden;
         }
         
         #dataset_table tbody tr {
@@ -473,7 +478,7 @@
         <div style="text-align: center; margin-bottom: 20px;">
             <img src="/static/img/see-spot-logo.png" alt="SeeSpot Logo" style="width: 180px; margin-bottom: 10px;">
             <div style="font-size: 32px; font-weight: bold;">SeeSpot</div>
-            <div style="font-size: 16px; color: #666;">by @mattjdavis</div>
+            <div style="font-size: 12px; color: #999; margin-top: 2px;">v{{ version }} by @mattjdavis</div>
         </div>
         <div style="height: 20px;"></div>
         <h3>Hotkeys</h3>
@@ -515,6 +520,12 @@
                     <span id="distance_max_label">5.00</span>
                 </div>
             </div>
+            <button id="reset_filters_btn" style="width: 100%; padding: 6px; background-color: #ff9800; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;">Reset Filters</button>
+            <div id="filter_count" style="margin-top: 10px; font-size: 12px; color: #666; text-align: center;"></div>
+        </div>
+        
+        <h3>Display</h3>
+        <div style="padding: 10px; background-color: #f5f5f5; border-radius: 4px; margin-bottom: 15px;">
             <div style="margin-bottom: 20px;">
                 <label style="font-weight: bold; display: block; margin-bottom: 8px;">Marker Size</label>
                 <div id="marker_size_slider" style="margin: 0 10px 15px 10px;"></div>
@@ -538,8 +549,37 @@
                     Display learned dye directions
                 </div>
             </div>
-            <button id="reset_filters_btn" style="width: 100%; padding: 6px; background-color: #ff9800; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;">Reset Filters</button>
-            <div id="filter_count" style="margin-top: 10px; font-size: 12px; color: #666; text-align: center;"></div>
+            <div style="margin-bottom: 15px;">
+                <label style="font-weight: bold; display: block; margin-bottom: 8px;">Display chan</label>
+                <select id="display_chan_select" style="width: 100%; padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 13px;">
+                    <option value="mixed">Mixed</option>
+                    <option value="unmixed">Unmixed</option>
+                </select>
+            </div>
+            <div style="margin-bottom: 15px;">
+                <label style="font-weight: bold; display: block; margin-bottom: 8px;">Show reassigned</label>
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <div class="toggle-switch">
+                        <input type="checkbox" id="highlight_reassigned_toggle" style="display: none;">
+                        <label for="highlight_reassigned_toggle" style="position: relative; display: inline-block; width: 40px; height: 20px; background-color: #ccc; border-radius: 20px; cursor: pointer; transition: background-color 0.3s;">
+                            <span style="position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background-color: white; transition: left 0.3s;"></span>
+                        </label>
+                    </div>
+                    <span id="highlight_status" style="font-size: 13px;">Off</span>
+                </div>
+            </div>
+            <div style="margin-bottom: 15px;">
+                <label style="font-weight: bold; display: block; margin-bottom: 8px;">Show removed</label>
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <div class="toggle-switch">
+                        <input type="checkbox" id="highlight_removed_toggle" style="display: none;">
+                        <label for="highlight_removed_toggle" style="position: relative; display: inline-block; width: 40px; height: 20px; background-color: #ccc; border-radius: 20px; cursor: pointer; transition: background-color 0.3s;">
+                            <span style="position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background-color: white; transition: left 0.3s;"></span>
+                        </label>
+                    </div>
+                    <span id="highlight_removed_status" style="font-size: 13px;">Off</span>
+                </div>
+            </div>
         </div>
         
         <h3>Chart Limits</h3>
@@ -641,46 +681,13 @@
                     <span id="sample_size_icon" style="margin-right: 8px; font-weight: bold; color: #4caf50;">✓</span>
                     <span id="sample_size_text">Small sample: full feature set</span>
                 </div>
-                <div id="filters" style="display: flex; flex-direction: column; gap: 10px; margin-bottom: 15px; background-color: #ffebee; padding: 10px; border-radius: 4px;">
-                    <div style="font-weight: bold; margin-bottom: 5px;">Filters</div>
-                    <div style="display: flex; align-items: center; margin-bottom: 10px;">
-                        <label for="display_chan_select" style="margin-right: 10px;">Display chan:</label>
-                        <select id="display_chan_select" style="padding: 4px 8px; border: 1px solid #ccc; border-radius: 4px;">
-                            <option value="mixed">Mixed</option>
-                            <option value="unmixed">Unmixed</option>
-                        </select>
-                    </div>
-                    <div style="display: flex; align-items: center; margin-bottom: 10px;">
-                        <label for="highlight_reassigned_toggle" style="margin-right: 10px;">Show reassigned:</label>
-                        <div class="toggle-switch">
-                            <input type="checkbox" id="highlight_reassigned_toggle" style="display: none;">
-                            <label for="highlight_reassigned_toggle" style="position: relative; display: inline-block; width: 40px; height: 20px; background-color: #ccc; border-radius: 20px; cursor: pointer; transition: background-color 0.3s;">
-                                <span style="position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background-color: white; transition: left 0.3s;"></span>
-                            </label>
-                        </div>
-                        <span id="highlight_status" style="margin-left: 10px; font-size: 13px;">Off</span>
-                    </div>
-                    <div style="display: flex; align-items: center;">
-                        <label for="highlight_removed_toggle" style="margin-right: 10px;">Show removed:</label>
-                        <div class="toggle-switch">
-                            <input type="checkbox" id="highlight_removed_toggle" style="display: none;">
-                            <label for="highlight_removed_toggle" style="position: relative; display: inline-block; width: 40px; height: 20px; background-color: #ccc; border-radius: 20px; cursor: pointer; transition: background-color 0.3s;">
-                                <span style="position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background-color: white; transition: left 0.3s;"></span>
-                            </label>
-                        </div>
-                        <span id="highlight_removed_status" style="margin-left: 10px; font-size: 13px;">Off</span>
-                    </div>
-                </div>
-                <div id="label_controls" style="display: flex; flex-direction: column; gap: 10px; margin-bottom: 15px; background-color: #fff3e0; padding: 10px; border-radius: 4px;">
-                    <div style="font-weight: bold; margin-bottom: 5px;">Labeling Controls</div>
-                    <div>
-                        <label for="label_input">Current Label:</label>
-                        <input type="text" id="label_input" placeholder="Enter label (optional)">
-                        <span id="active_label_display" style="font-style: italic;">(None)</span>
-                    </div>
-                </div>
                 <div id="table_controls" style="display: flex; flex-direction: column; gap: 10px; margin-bottom: 15px; background-color: #e8f5e9; padding: 10px; border-radius: 4px;">
                     <div style="font-weight: bold; margin-bottom: 5px;">Table Controls</div>
+                    <div style="margin-bottom: 10px;">
+                        <label for="label_input" style="font-weight: normal; margin-right: 5px;">Current Label:</label>
+                        <input type="text" id="label_input" placeholder="Enter label (optional)" style="width: 120px; padding: 3px 6px; border: 1px solid #ccc; border-radius: 3px; font-size: 12px;">
+                        <span id="active_label_display" style="font-style: italic; margin-left: 5px; font-size: 12px;">(None)</span>
+                    </div>
                     <div id="spots_buttons_container">
                         <button id="add_lasso_selection_button">Add Lasso Selection</button>
                         <button id="clear_spots_button">Clear Selected Spots</button>

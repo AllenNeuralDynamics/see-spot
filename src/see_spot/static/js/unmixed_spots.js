@@ -178,10 +178,12 @@ document.addEventListener('DOMContentLoaded', function () {
             searching: true, // Enable search box
             ordering: true, // Enable column sorting
             info: false, // Hide "Showing X to Y of Z entries" text
+            scrollX: false, // Disable horizontal scrolling
+            autoWidth: false, // Disable auto width calculation
             columnDefs: [
-                { width: "45%", targets: 0 }, // Dataset Name column
-                { width: "35%", targets: 1 }, // Date Added column
-                { width: "20%", targets: 2, orderable: false } // Status column (no sorting)
+                { width: "80%", targets: 0, className: "text-wrap" }, // Dataset Name column
+                { width: "10%", targets: 1 }, // Date Added column
+                { width: "10%", targets: 2, orderable: false } // Status column (no sorting)
             ],
             language: {
                 search: "Filter datasets:",

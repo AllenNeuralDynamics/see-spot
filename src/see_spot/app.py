@@ -4,6 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from datetime import datetime
 from see_spot import ng_utils
+from see_spot import __version__
 import uvicorn
 import logging
 import os
@@ -1099,7 +1100,7 @@ async def set_active_dataset(request: Request):
 @app.get("/unmixed-spots")
 async def unmixed_spots_page(request: Request):
     logger.info("Unmixed spots page accessed")
-    return templates.TemplateResponse("unmixed_spots.html", {"request": request})
+    return templates.TemplateResponse("unmixed_spots.html", {"request": request, "version": __version__})
 
 
 if __name__ == '__main__':
