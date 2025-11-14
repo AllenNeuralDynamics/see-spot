@@ -25,6 +25,11 @@ from see_spot.s3_utils import (
 )
 
 
+# Initialize logging using central utility (idempotent)
+setup_logging(os.getenv("SEE_SPOT_LOG_LEVEL", "INFO"))
+logger = logging.getLogger(__name__)
+
+
 def load_config():
     """Load configuration from file with precedence: env var > config file > defaults"""
     config_paths = [
@@ -51,10 +56,6 @@ def load_config():
         'aws': {}
     }
 
-
-# Initialize logging using central utility (idempotent)
-setup_logging(os.getenv("SEE_SPOT_LOG_LEVEL", "INFO"))
-logger = logging.getLogger(__name__)
 
 # Load config
 config = load_config()
