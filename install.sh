@@ -480,11 +480,13 @@ EOF
     
     log_success "Launcher script created: $LAUNCHER"
     
-    # Check if ~/.local/bin is in PATH
-    if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+    # Check if ~/.local/bin is in PATH (skip in Docker/non-interactive environments)
+    if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]] && [ -t 1 ]; then
         log_warning "~/.local/bin is not in your PATH"
         log_warning "Add this to your ~/.bashrc or ~/.zshrc:"
         log_warning "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+        log_warning "Or for Docker, add to Dockerfile:"
+        log_warning "  ENV PATH=\"\$HOME/.local/bin:\$PATH\""
     fi
 }
 
