@@ -134,9 +134,16 @@ check_aws_credentials() {
     
     HAS_CREDS=false
     
-    # Check environment variables
+    # Check environment variables (standard credentials)
     if [ ! -z "$AWS_ACCESS_KEY_ID" ] && [ ! -z "$AWS_SECRET_ACCESS_KEY" ]; then
         log_success "AWS credentials found in environment variables"
+        HAS_CREDS=true
+        return 0
+    fi
+    
+    # Check for ECS task role (Docker container with task role)
+    if [ ! -z "$AWS_CONTAINER_CREDENTIALS_RELATIVE_URI" ]; then
+        log_success "ECS task role detected (Docker/ECS container)"
         HAS_CREDS=true
         return 0
     fi
@@ -162,6 +169,7 @@ check_aws_credentials() {
         log_warning "  1. Environment variables: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY"
         log_warning "  2. AWS CLI: aws configure"
         log_warning "  3. IAM role (if running on EC2)"
+        log_warning "  4. ECS task role (if running in Docker/ECS)"
         log_warning ""
         log_warning "You can continue installation and set up credentials later."
         

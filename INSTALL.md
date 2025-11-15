@@ -77,8 +77,13 @@ The `install.sh` script supports the following options:
 SeeSpot requires AWS credentials to access data. The installer checks for credentials in this order:
 
 1. **Environment Variables**: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`
-2. **AWS CLI Config**: `~/.aws/credentials` (default profile)
-3. **IAM Role**: For EC2 instances with attached IAM roles
+2. **ECS Task Role**: `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` (for Docker/ECS containers)
+3. **AWS CLI Config**: `~/.aws/credentials` (default profile)
+4. **IAM Role**: For EC2 instances with attached IAM roles
+
+### For Docker/ECS Containers:
+
+If running in a Docker container with an ECS task role, AWS credentials are automatically provided via the container metadata endpoint. No additional configuration is needed - the installer will detect `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` and confirm credentials are available.
 
 ### Setting up AWS CLI credentials:
 

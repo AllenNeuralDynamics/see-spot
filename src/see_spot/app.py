@@ -46,6 +46,10 @@ def load_config():
             try:
                 with open(config_path, 'r') as f:
                     loaded_config = yaml.safe_load(f)
+                    # Handle empty YAML files (yaml.safe_load returns None for empty files)
+                    if loaded_config is None:
+                        config_logger.warning(f"Config file at {config_path} is empty, using defaults")
+                        continue
                     config_logger.info(f"Loaded configuration from: {config_path}")
                     return loaded_config
             except Exception as e:
