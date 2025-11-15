@@ -320,8 +320,10 @@ install_environment() {
 # Create launcher script
 create_launcher() {
     log_info "Creating launcher script..."
-    
-    LAUNCHER="$HOME/.local/bin/seespot"
+
+    # try launcher in spot for code-ocean build
+    LAUNCHER="/usr/local/sbin"
+    # LAUNCHER="$HOME/.local/bin/seespot"
     
     if [ "$DRY_RUN" = true ]; then
         log_info "[DRY RUN] Would create launcher: $LAUNCHER"
@@ -329,7 +331,7 @@ create_launcher() {
     fi
     
     # Create .local/bin if it doesn't exist
-    mkdir -p "$HOME/.local/bin"
+    # mkdir -p "$HOME/.local/bin"
     
     # Create launcher script
     cat > "$LAUNCHER" << 'EOF'
