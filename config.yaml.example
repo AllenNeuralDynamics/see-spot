@@ -17,6 +17,10 @@ server:
 
 # AWS configuration (optional)
 aws:
+  # S3 bucket containing the data
+  # Default: aind-open-data
+  bucket: aind-open-data
+  
   # AWS profile name from ~/.aws/credentials
   # If not specified, uses default profile or environment variables
   # profile: default
@@ -24,10 +28,6 @@ aws:
   # AWS region
   # If not specified, uses AWS_DEFAULT_REGION or us-west-2
   # region: us-west-2
-  
-  # S3 bucket containing the data
-  # Default: aind-open-data
-  # bucket: aind-open-data
 
 # Logging configuration (optional)
 # logging:

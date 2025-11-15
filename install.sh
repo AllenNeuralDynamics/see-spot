@@ -272,6 +272,9 @@ server:
   port: $SERVER_PORT
 
 aws:
+  # S3 bucket for data access
+  bucket: aind-open-data
+  
   # Optional: specify AWS profile name
   # profile: default
   

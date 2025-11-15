@@ -9,4 +9,5 @@ python-multipart
 s3fs
 zarr
 pyyaml
+pyarrow
 aind-ng-link @ git+https://github.com/AllenNeuralDynamics/aind-ng-link.git
