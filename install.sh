@@ -322,7 +322,7 @@ create_launcher() {
     log_info "Creating launcher script..."
 
     # try launcher in spot for code-ocean build
-    LAUNCHER="/usr/local/sbin"
+    LAUNCHER="/usr/local/sbin/seespot"
     # LAUNCHER="$HOME/.local/bin/seespot"
     
     if [ "$DRY_RUN" = true ]; then
