@@ -480,13 +480,46 @@ EOF
     
     log_success "Launcher script created: $LAUNCHER"
     
-    # Check if ~/.local/bin is in PATH (skip in Docker/non-interactive environments)
-    if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]] && [ -t 1 ]; then
-        log_warning "~/.local/bin is not in your PATH"
-        log_warning "Add this to your ~/.bashrc or ~/.zshrc:"
-        log_warning "  export PATH=\"\$HOME/.local/bin:\$PATH\""
-        log_warning "Or for Docker, add to Dockerfile:"
-        log_warning "  ENV PATH=\"\$HOME/.local/bin:\$PATH\""
+    # Add ~/.local/bin to PATH if not already present
+    if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+        # Detect shell config file
+        if [ -f "$HOME/.bashrc" ]; then
+            SHELL_CONFIG="$HOME/.bashrc"
+        elif [ -f "$HOME/.bash_profile" ]; then
+            SHELL_CONFIG="$HOME/.bash_profile"
+        elif [ -f "$HOME/.zshrc" ]; then
+            SHELL_CONFIG="$HOME/.zshrc"
+        elif [ -f "$HOME/.profile" ]; then
+            SHELL_CONFIG="$HOME/.profile"
+        else
+            SHELL_CONFIG=""
+        fi
+        
+        if [ -n "$SHELL_CONFIG" ] && [ -t 1 ]; then
+            # Interactive mode - ask user
+            log_info "~/.local/bin is not in your PATH"
+            if [ "$YES_FLAG" = false ]; then
+                read -p "Add PATH export to $SHELL_CONFIG? [Y/n]: " ADD_PATH
+                if [[ ! "$ADD_PATH" =~ ^[Nn]$ ]]; then
+                    echo "" >> "$SHELL_CONFIG"
+                    echo "# Added by SeeSpot installer" >> "$SHELL_CONFIG"
+                    echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$SHELL_CONFIG"
+                    log_success "Added PATH export to $SHELL_CONFIG"
+                    log_info "Run: source $SHELL_CONFIG"
+                fi
+            else
+                # Non-interactive - add automatically
+                if ! grep -q "export PATH=\"\$HOME/.local/bin:\$PATH\"" "$SHELL_CONFIG" 2>/dev/null; then
+                    echo "" >> "$SHELL_CONFIG"
+                    echo "# Added by SeeSpot installer" >> "$SHELL_CONFIG"
+                    echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$SHELL_CONFIG"
+                    log_success "Added PATH export to $SHELL_CONFIG"
+                fi
+            fi
+        elif [ ! -t 1 ]; then
+            # Non-interactive (Docker/CI) - just log for reference
+            log_verbose "For Docker, add to Dockerfile: ENV PATH=\"\$HOME/.local/bin:\$PATH\""
+        fi
     fi
 }
 
