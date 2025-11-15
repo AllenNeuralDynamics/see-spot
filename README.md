@@ -33,8 +33,8 @@ seespot start
 For detailed installation instructions, AWS credentials setup, and troubleshooting, see [INSTALL.md](INSTALL.md).
 
 ## App UI
-![Spot Visualization](img/seespot-app-v.png)
-*Interactive dashboard showing spot channel analysis with Sankey flow diagram, scatter plot, and summary statistics*
+![Spot Visualization](img/seespot-app-v6.8.png)
+*Interactive dashboard showing spot channel analysis*
 
 ## Development Setup
 + Install
