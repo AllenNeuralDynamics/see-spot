@@ -662,13 +662,41 @@ async def create_neuroglancer_link(request: Request):
         cross_section_scale,
     )
 
-    # Determine JSON file name (env override allowed) and full S3 path
-    ng_json_filename = os.getenv(
-        "SEE_SPOT_NG_JSON_NAME", "phase_correlation_stitching_neuroglancer.json"
-    )
-    ng_json_path = f"s3://{S3_BUCKET}/{DATA_PREFIX}/{ng_json_filename}"
-    s3_key_for_json = f"{DATA_PREFIX}/{ng_json_filename}"  # key relative to bucket
-    logger.info("Constructed Neuroglancer JSON path: %s", ng_json_path)
+    # Determine dataset context (tile-specific JSONs live under image_spot_detection)
+    import re
+
+    tile_pattern = re.compile(r"_X_\d+_Y_\d+_Z_\d+$")
+    tile_match = tile_pattern.search(DATA_PREFIX) if DATA_PREFIX else None
+    base_dataset_name = DATA_PREFIX
+    tile_folder = None
+
+    if tile_match and DATA_PREFIX:
+        parts = DATA_PREFIX.rsplit('_', 6)
+        if len(parts) > 1:
+            base_dataset_name = parts[0]
+            tile_suffix = '_'.join(parts[1:])
+            tile_folder = f"Tile_{tile_suffix}"
+            logger.info(
+                "Detected tile dataset for Neuroglancer request | base=%s tile=%s",
+                base_dataset_name,
+                tile_folder,
+            )
+
+    # Determine JSON file name (env override allowed for non-tile datasets) and full S3 path
+    if tile_folder:
+        ng_json_filename = f"{tile_folder}_spot_annotation_ng_link.json"
+        s3_key_for_json = (
+            f"{base_dataset_name}/image_spot_detection/{ng_json_filename}"
+        )
+        ng_json_path = f"s3://{S3_BUCKET}/{s3_key_for_json}"
+        logger.info("Using tile-specific Neuroglancer JSON: %s", ng_json_path)
+    else:
+        ng_json_filename = os.getenv(
+            "SEE_SPOT_NG_JSON_NAME", "phase_correlation_stitching_neuroglancer.json"
+        )
+        ng_json_path = f"s3://{S3_BUCKET}/{DATA_PREFIX}/{ng_json_filename}"
+        s3_key_for_json = f"{DATA_PREFIX}/{ng_json_filename}"  # key relative to bucket
+        logger.info("Using default Neuroglancer JSON: %s", ng_json_path)
 
     # Check existence of JSON on S3 (metadata only) for better diagnostics
     json_metadata = None
@@ -692,7 +720,20 @@ async def create_neuroglancer_link(request: Request):
         )
 
     # Decide strategy: prefer JSON-based method when file exists; fall back otherwise
-    use_json_method = json_metadata is not None or "merged" in unmixed_spots_filename.lower()
+    if tile_folder:
+        use_json_method = json_metadata is not None
+        if not use_json_method:
+            logger.warning(
+                "Tile-specific Neuroglancer JSON missing: %s | falling back to direct method",
+                ng_json_path,
+            )
+    else:
+        merged_flag = (
+            unmixed_spots_filename.lower().find("merged") != -1
+            if isinstance(unmixed_spots_filename, str)
+            else False
+        )
+        use_json_method = json_metadata is not None or merged_flag
     logger.info("Use JSON method decision: %s", use_json_method)
 
     try:
@@ -711,6 +752,7 @@ async def create_neuroglancer_link(request: Request):
                     annotation_color=annotation_color,
                     spacing=3.0,
                     cross_section_scale=cross_section_scale,
+                    hide_existing_annotations=True,
                 )
                 logger.info("Successfully built Neuroglancer link from JSON")
             except Exception as json_err:

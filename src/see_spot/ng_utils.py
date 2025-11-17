@@ -259,6 +259,7 @@ def create_link_from_json(
     spacing=3.0,
     cross_section_scale=None,
     base_url="https://neuroglancer-demo.appspot.com",
+    hide_existing_annotations=True,
 ):
     """
     Create a Neuroglancer link from an existing JSON file with updated position and annotation.
@@ -273,6 +274,9 @@ def create_link_from_json(
     spacing (float, optional): Spacing for annotations in cross-section view. Default: 3.0
     cross_section_scale (float, optional): Scale for cross-section view. If None, keeps existing value
     base_url (str, optional): Base Neuroglancer URL. Default: "https://neuroglancer-demo.appspot.com"
+
+    hide_existing_annotations (bool, optional): When True, sets existing annotation
+        layers to invisible before adding the new spot annotation. Default: True
 
     Returns:
     --------
@@ -318,6 +322,16 @@ def create_link_from_json(
         state_dict["crossSectionScale"] = cross_section_scale
         print(f"Updated crossSectionScale to: {cross_section_scale}")
 
+    # Hide existing annotation layers if requested
+    if hide_existing_annotations and "layers" in state_dict:
+        hidden_layers = 0
+        for layer in state_dict["layers"]:
+            if layer.get("type") == "annotation":
+                layer["visible"] = False
+                hidden_layers += 1
+        if hidden_layers:
+            print(f"Hid {hidden_layers} existing annotation layer(s) before adding spot {spot_id}")
+
     # Find or create annotation layer
     annotation_layer_found = False
 
@@ -339,6 +353,7 @@ def create_link_from_json(
                     "crossSectionAnnotationSpacing"
                 ] = spacing
                 state_dict["layers"][i]["annotations"] = [annotation]
+                state_dict["layers"][i]["visible"] = True
 
                 annotation_layer_found = True
                 print(f"Updated existing annotation layer with spot {spot_id}")
