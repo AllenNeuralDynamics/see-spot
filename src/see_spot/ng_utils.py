@@ -332,56 +332,42 @@ def create_link_from_json(
         if hidden_layers:
             print(f"Hid {hidden_layers} existing annotation layer(s) before adding spot {spot_id}")
 
-    # Find or create annotation layer
-    annotation_layer_found = False
+    # Ensure layers list exists and append fresh annotation layer for the selected spot
+    if "layers" not in state_dict or not isinstance(state_dict["layers"], list):
+        state_dict["layers"] = []
 
-    if "layers" in state_dict:
-        # Look for existing annotation layer
-        for i, layer in enumerate(state_dict["layers"]):
-            if layer.get("type") == "annotation":
-                # Update existing annotation layer
-                annotation = {
-                    "type": "point",
-                    "id": str(spot_id),
-                    "point": point_annotation,
-                }
+    spot_layer_name = f"Spot {spot_id}"
 
-                # Update the layer properties
-                state_dict["layers"][i]["name"] = f"Spot {spot_id}"
-                state_dict["layers"][i]["annotationColor"] = annotation_color
-                state_dict["layers"][i][
-                    "crossSectionAnnotationSpacing"
-                ] = spacing
-                state_dict["layers"][i]["annotations"] = [annotation]
-                state_dict["layers"][i]["visible"] = True
+    # Remove any prior custom layer for this spot to avoid duplication
+    state_dict["layers"] = [
+        layer
+        for layer in state_dict["layers"]
+        if not (
+            layer.get("type") == "annotation"
+            and layer.get("name") == spot_layer_name
+            and layer.get("tab") == "annotations"
+        )
+    ]
 
-                annotation_layer_found = True
-                print(f"Updated existing annotation layer with spot {spot_id}")
-                break
-
-        # If no annotation layer exists, create one
-        if not annotation_layer_found:
-            annotation_layer = {
-                "type": "annotation",
-                "name": f"Spot {spot_id}",
-                "tab": "annotations",
-                "visible": True,
-                "annotationColor": annotation_color,
-                "crossSectionAnnotationSpacing": spacing,
-                "projectionAnnotationSpacing": 10,
-                "tool": "annotatePoint",
-                "annotations": [
-                    {
-                        "type": "point",
-                        "id": str(spot_id),
-                        "point": point_annotation,
-                    }
-                ],
+    annotation_layer = {
+        "type": "annotation",
+        "name": spot_layer_name,
+        "tab": "annotations",
+        "visible": True,
+        "annotationColor": annotation_color,
+        "crossSectionAnnotationSpacing": spacing,
+        "projectionAnnotationSpacing": 10,
+        "tool": "annotatePoint",
+        "annotations": [
+            {
+                "type": "point",
+                "id": str(spot_id),
+                "point": point_annotation,
             }
-            state_dict["layers"].append(annotation_layer)
-            print(f"Created new annotation layer with spot {spot_id}")
-    else:
-        print("Warning: No 'layers' found in Neuroglancer state")
+        ],
+    }
+    state_dict["layers"].append(annotation_layer)
+    print(f"Appended new annotation layer with spot {spot_id}")
 
     # Generate direct URL
     direct_url = create_direct_neuroglancer_url(state_dict, base_url=base_url)
