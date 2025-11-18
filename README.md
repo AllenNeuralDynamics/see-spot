@@ -7,9 +7,21 @@
 ![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen?logo=codecov)
 ![Python](https://img.shields.io/badge/python->=3.10-blue?logo=python)
 
-## Quick Start
+## Overview
 
-### Installation
+
+https://github.com/user-attachments/assets/3f5d2589-f73a-4400-93fd-d5aa27ca4590
+
+
+## Installation
+
+### CodeOcean
+Clone this [Capsule](https://codeocean.allenneuraldynamics.org/capsule/7850268/tree)
+
+Follow instructions
+![alt text]({971F613E-8E1E-4B1B-8761-02536AFD79D0}.png)
+
+### Local install
 ```bash
 # Clone repository
 git clone https://github.com/AllenNeuralDynamics/see-spot.git
@@ -20,33 +32,32 @@ cd see-spot
 
 # Or customize settings interactively
 ./install.sh --interactive
-```
 
-### Launch
-```bash
 # Start the server
 seespot start
 
 # Access at http://localhost:5555
 ```
 
+
 For detailed installation instructions, AWS credentials setup, and troubleshooting, see [INSTALL.md](INSTALL.md).
 
-## App UI
+<!-- ## App UI
 ![Spot Visualization](img/seespot-app-v6.8.png)
-*Interactive dashboard showing spot channel analysis*
+*Interactive dashboard showing spot channel analysis* -->
+
 
 ## Development Setup
-+ Install
-  + `uv sync`
++ `git clone https://github.com/AllenNeuralDynamics/see-spot.git`
++ Install: `uv sync`
 + Launch with auto-reload: 
 ```bash
 cd /home/matt.davis/code/see-spot && source .venv/bin/activate && cd src && uvicorn see_spot.app:app --host 0.0.0.0 --port 9999 --reload
 ```
 
-## Dataset Types
+# Dataset Info
 
-### Regular (Fused) Datasets
+## Regular (Fused) Datasets
 Standard datasets with fused image data at the top level:
 ```
 dataset_name/
@@ -57,7 +68,7 @@ dataset_name/
     channel_*.zarr
 ```
 
-### Tiled (Non-Fused) Datasets
+## Tiled (Non-Fused) Datasets
 Datasets with independent tile processing, where each tile has separate spot data:
 ```
 dataset_name/
@@ -74,14 +85,16 @@ When downloading a tiled dataset, the system automatically:
 - Creates virtual dataset entries for each tile
 - Names them as: `{dataset_name}_X_####_Y_####_Z_####`
 
-Example: Downloading `HCR_799211_2025-10-02_15-10-00_processed_2025-11-06_22-50-54` with tiles creates:
-- `HCR_799211_2025-10-02_15-10-00_processed_2025-11-06_22-50-54_X_0001_Y_0000_Z_0000`
-- `HCR_799211_2025-10-02_15-10-00_processed_2025-11-06_22-50-54_X_0002_Y_0000_Z_0000`
-- etc.
-
-Each virtual tile dataset appears as a separate entry in the dataset management table and can be loaded independently.
-
 ## Changelog
++ v0.6.9 (11-17-2025)
+  - loading of single tile dataset 
+    - Looks in spectral_unmixing, if "Tile" subfolders" load pkl files from each and show them in the app
+  - load mixed table first
+  - dye lines plotting
+  - display filters (r dist) refactor
+  - Better dataset management (with filters) use DataTables js
+  - add spot persistent when clicked
+  - Big feature: use lasso to make multi selection neuroglancer annotations
 + v0.5.0 (09-19-2025)
   + backend downloads mixed + unmixed tables, merges and saves as .parquet (massive compression)
   + polars for dataframe manipulation (huge speedup)
