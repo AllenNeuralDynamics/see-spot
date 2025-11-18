@@ -210,7 +210,7 @@ configure() {
     log_info "Configuring SeeSpot..."
     
     # Default values
-    DEFAULT_CACHE_DIR="$HOME/.seespot/cache"
+    DEFAULT_CACHE_DIR="$HOME/capsule/scratch/.seespot/cache"
     DEFAULT_PORT=5555
     DEFAULT_HOST="0.0.0.0"
     
