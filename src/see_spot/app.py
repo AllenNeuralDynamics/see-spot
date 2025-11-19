@@ -516,7 +516,8 @@ async def get_real_spots_data(
         else:
             spot_details = {
                 str(int(row['spot_id'])): {
-                    col: row[col] for col in available_detail_cols if col != 'spot_id'
+                    col: (row[col].item() if hasattr(row[col], 'item') else row[col])
+                    for col in available_detail_cols if col != 'spot_id'
                 }
                 for _, row in spot_details_df.iterrows()
             }
@@ -549,6 +550,11 @@ async def get_real_spots_data(
     # 8. Convert DataFrame to list of records (dictionaries)
     try:
         data_for_frontend = plot_df_subset.to_dict(orient='records')
+        # Convert numpy types to native Python types for JSON serialization
+        for record in data_for_frontend:
+            for key, value in record.items():
+                if hasattr(value, 'item'):  # numpy scalar
+                    record[key] = value.item()
         logger.info(f"Prepared {len(data_for_frontend)} records for frontend.")
     except Exception as e:
         logger.error(f"Error converting DataFrame to dict: {e}", exc_info=True)
