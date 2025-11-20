@@ -61,6 +61,7 @@ document.addEventListener('DOMContentLoaded', function () {
     let displayChanMode = 'mixed'; // 'unmixed' or 'mixed'
     let isNeuroglancerMode = false;
     let showDyeLines = false; // Toggle state for dye lines
+    let channelVisibilityState = {}; // Track user's manual legend selections
     let spotDetails = {}; // Will store the spot details for neuroglancer lookup
     let fusedS3Paths = {}; // Will store the fused S3 paths from the API
     let summaryStats = null; // Will store the summary stats from the API
@@ -1537,10 +1538,16 @@ document.addEventListener('DOMContentLoaded', function () {
                     fontSize: 14
                 },
                 selected: sortedChannels.reduce((acc, chan) => {
-                    // Hide "Removed" by default in unmixed mode
-                    const isRemovedSeries = chan === 'Removed';
-                    const shouldHideByDefault = isRemovedSeries && displayChanMode === 'unmixed';
-                    acc[chan] = !shouldHideByDefault;
+                    // Check if user has manually set preference for this channel
+                    if (channelVisibilityState.hasOwnProperty(chan)) {
+                        // Use user's preference
+                        acc[chan] = channelVisibilityState[chan];
+                    } else {
+                        // Apply default behavior: hide "Removed" by default in unmixed mode
+                        const isRemovedSeries = chan === 'Removed';
+                        const shouldHideByDefault = isRemovedSeries && displayChanMode === 'unmixed';
+                        acc[chan] = !shouldHideByDefault;
+                    }
                     return acc;
                 }, {})
             },
@@ -1684,6 +1691,13 @@ document.addEventListener('DOMContentLoaded', function () {
                     addSpotToTable(itemData, currentLabel);
                 }
             }
+        });
+
+        // Capture legend selection changes to persist user preferences
+        myChart.on('legendselectchanged', function (params) {
+            console.log('Legend selection changed:', params.selected);
+            // Update our state tracking with user's selections
+            channelVisibilityState = Object.assign({}, params.selected);
         });
 
         // Brush (lasso) selection event
