@@ -10,6 +10,7 @@ import logging
 import os
 from pathlib import Path
 import polars as pl
+import pandas as pd
 import itertools
 from typing import List, Tuple, Dict, Any
 import yaml
@@ -300,10 +301,13 @@ def calculate_sankey_data(df: Any) -> Dict[str, Any]:
 async def get_real_spots_data(
     sample_size: int = SAMPLE_SIZE,
     force_refresh: bool = False,
-    valid_spots_only: bool = False
+    valid_spots_only: bool = False,
+    sampling_type: str = "class_balanced",
+    display_chan: str = "mixed"
 ):
     logger.info(f"Real spots data requested with sample size: {sample_size}, "
-                f"force_refresh: {force_refresh}, valid_spots_only: {valid_spots_only}")
+                f"force_refresh: {force_refresh}, valid_spots_only: {valid_spots_only}, "
+                f"sampling_type: {sampling_type}, display_chan: {display_chan}")
 
     # Check if a dataset has been selected
     if DATA_PREFIX is None:
@@ -452,7 +456,53 @@ async def get_real_spots_data(
     # 4. Subsample the data
     if len(df) > sample_size:
         logger.info(f"Subsampling DataFrame from {len(df)} to {sample_size} rows.")
-        plot_df = df.sample(n=sample_size, random_state=None).copy()
+        
+        if sampling_type == "class_balanced":
+            # Class-balanced sampling: sample equally from each channel
+            # Use the appropriate channel column based on display mode
+            channel_col = 'chan' if display_chan == 'mixed' else 'unmixed_chan'
+            logger.info(f"Using class-balanced sampling on column: {channel_col}")
+            
+            # Get unique channels and their counts
+            unique_channels = df[channel_col].unique()
+            num_channels = len(unique_channels)
+            samples_per_channel = sample_size // num_channels
+            
+            logger.info(f"Found {num_channels} unique channels, sampling {samples_per_channel} per channel")
+            
+            # Sample from each channel
+            sampled_dfs = []
+            import secrets
+            for channel in unique_channels:
+                channel_df = df[df[channel_col] == channel]
+                n_samples = min(len(channel_df), samples_per_channel)
+                random_seed = secrets.randbelow(2**32)
+                sampled = channel_df.sample(n=n_samples, random_state=random_seed)
+                sampled_dfs.append(sampled)
+                logger.info(f"Channel {channel}: sampled {n_samples} from {len(channel_df)} spots")
+            
+            # Concatenate all samples
+            plot_df = pd.concat(sampled_dfs, ignore_index=True)
+            
+            # If we're short of target sample size, add random samples to fill
+            if len(plot_df) < sample_size:
+                remaining = sample_size - len(plot_df)
+                # Get spots not already sampled
+                remaining_df = df[~df.index.isin(plot_df.index)]
+                if len(remaining_df) > 0:
+                    random_seed = secrets.randbelow(2**32)
+                    additional = remaining_df.sample(n=min(remaining, len(remaining_df)), random_state=random_seed)
+                    plot_df = pd.concat([plot_df, additional], ignore_index=True)
+                    logger.info(f"Added {len(additional)} additional random samples to reach target")
+            
+            plot_df = plot_df.copy()
+            logger.info(f"Class-balanced sampling complete: {len(plot_df)} total samples")
+        else:
+            # Random sampling
+            import secrets
+            random_seed = secrets.randbelow(2**32)
+            plot_df = df.sample(n=sample_size, random_state=random_seed).copy()
+            logger.info(f"Random sampling with seed: {random_seed}")
     else:
         plot_df = df.copy()
     logger.info(f"Plotting DataFrame shape: {plot_df.shape}")

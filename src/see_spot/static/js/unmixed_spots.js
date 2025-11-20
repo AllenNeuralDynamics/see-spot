@@ -12,6 +12,7 @@ document.addEventListener('DOMContentLoaded', function () {
     const nextChannelButton = document.getElementById('next_channel_pair');
     const currentChannelDisplay = document.getElementById('current_channel_display');
     const sampleSizeInput = document.getElementById('sample-size-input');
+    const samplingTypeSelect = document.getElementById('sampling-type-select');
     const resampleButton = document.getElementById('resample_button');
     const sampleSizeNote = document.getElementById('sample_size_note');
     const sampleSizeIcon = document.getElementById('sample_size_icon');
@@ -54,6 +55,7 @@ document.addEventListener('DOMContentLoaded', function () {
     let channelPairs = [];
     let currentPairIndex = 0;
     let currentSampleSize = parseInt(sampleSizeInput.value) || 10000;
+    let samplingType = 'class_balanced'; // 'class_balanced' or 'random'
     let highlightReassigned = false;
     let highlightRemoved = false;
     let displayChanMode = 'mixed'; // 'unmixed' or 'mixed'
@@ -671,25 +673,31 @@ document.addEventListener('DOMContentLoaded', function () {
         }
         
         currentSampleSize = newSampleSize;
+        const selectedValue = samplingTypeSelect.value;
+        samplingType = selectedValue; // Get current sampling type
+        console.log(`Resample clicked: dropdown value = ${selectedValue}, samplingType = ${samplingType}, displayChanMode = ${displayChanMode}`);
+        console.log(`Dropdown element:`, samplingTypeSelect);
         updateSampleSizeNote(currentSampleSize);
         
         // Show loading state
         myChart.showLoading({
-            text: 'Loading new sample...',
+            text: `Loading new sample (${samplingType})...`,
             maskColor: 'rgba(255, 255, 255, 0.8)',
             fontSize: 14
         });
         
-        // Fetch data with new sample size
+        // Fetch data with new sample size and sampling type
         fetchData(currentSampleSize, false);
     });
 
     // Handle refresh button click (force reload data from server)
-    refreshButton.addEventListener('click', function() {
-        if (confirm("This will reload data from the server. Continue?")) {
-            refreshData(true);
-        }
-    });
+    if (refreshButton) {
+        refreshButton.addEventListener('click', function() {
+            if (confirm("This will reload data from the server. Continue?")) {
+                refreshData(true);
+            }
+        });
+    }
 
     // Add function for refresh button
     function refreshData(forceRefresh = true) {
@@ -735,8 +743,8 @@ document.addEventListener('DOMContentLoaded', function () {
     // Fetch data function
     function fetchData(sampleSize, forceRefresh = false) {
         const validSpotsOnly = false; // validSpotToggle.checked; // Toggle disabled
-        const url = `/api/real_spots_data?sample_size=${sampleSize}${forceRefresh ? '&force_refresh=true' : ''}${validSpotsOnly ? '&valid_spots_only=true' : '&valid_spots_only=false'}`;
-        console.log(`Fetching data with URL: ${url}`);
+        const url = `/api/real_spots_data?sample_size=${sampleSize}&sampling_type=${samplingType}&display_chan=${displayChanMode}${forceRefresh ? '&force_refresh=true' : ''}${validSpotsOnly ? '&valid_spots_only=true' : '&valid_spots_only=false'}`;
+        console.log(`Fetching data with URL: ${url} (sampling: ${samplingType}, display: ${displayChanMode})`);
         
         fetch(url)
             .then(response => {
@@ -2079,6 +2087,13 @@ document.addEventListener('DOMContentLoaded', function () {
         
         // Update chart with new channel display mode
         updateChart();
+    });
+    
+    // Event listener for sampling type select
+    samplingTypeSelect.addEventListener('change', function() {
+        samplingType = this.value;
+        console.log(`Sampling type changed to: ${samplingType}`);
+        // Note: Does not automatically resample - user must click Resample button
     });
 
     // Event listener for highlight removed toggle
