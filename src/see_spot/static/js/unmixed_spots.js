@@ -1234,10 +1234,17 @@ document.addEventListener('DOMContentLoaded', function () {
             return a.localeCompare(b);
         });
         
-        const series = sortedChannels.map(channel => ({
-            name: channel, // Remove the Mixed/Unmixed prefix from individual labels
-            type: 'scatter',
-            data: seriesData[channel].map(point => {
+        const series = sortedChannels.map(channel => {
+            // Start with series hidden if it's "Removed" in unmixed mode
+            const isRemovedSeries = channel === 'Removed';
+            const shouldHideByDefault = isRemovedSeries && displayChanMode === 'unmixed';
+            
+            return {
+                name: channel, // Remove the Mixed/Unmixed prefix from individual labels
+                type: 'scatter',
+                // Hide "Removed" series by default in unmixed mode
+                selected: !shouldHideByDefault,
+                data: seriesData[channel].map(point => {
                 const spotId = point.value[4];
                 const isClicked = neuroglancerClickedSpots.has(spotId);
                 const baseSize = (channel === 'Removed' ? 8 : 5) * markerSizeMultiplier;
@@ -1354,7 +1361,8 @@ document.addEventListener('DOMContentLoaded', function () {
             },
             // Use fixed color for the legend
             color: COLORS[channel] || COLORS.default
-        }));
+        };
+        });
         
         // Configuration for slider positioning and styling
         const sliderConfig = {
@@ -1529,7 +1537,10 @@ document.addEventListener('DOMContentLoaded', function () {
                     fontSize: 14
                 },
                 selected: sortedChannels.reduce((acc, chan) => {
-                    acc[chan] = true; // Use channel name without prefix
+                    // Hide "Removed" by default in unmixed mode
+                    const isRemovedSeries = chan === 'Removed';
+                    const shouldHideByDefault = isRemovedSeries && displayChanMode === 'unmixed';
+                    acc[chan] = !shouldHideByDefault;
                     return acc;
                 }, {})
             },
