@@ -298,6 +298,7 @@ def load_and_merge_spots_from_s3(
     unmixed_spots_prefix: str,
     valid_spots_only: bool = True,
     tile_folder: Optional[str] = None,
+    cache_dir: str = "/s3-cache",
 ) -> Optional[pl.DataFrame]:
     """
     Load both mixed and unmixed spots files, merge them, cache as parquet, and return merged DataFrame.
@@ -308,6 +309,7 @@ def load_and_merge_spots_from_s3(
         unmixed_spots_prefix: S3 prefix where spots files are located
         valid_spots_only: If True, filter to only valid spots. If False, return all spots.
         tile_folder: Optional tile folder name (e.g., "Tile_X_0001_Y_0000_Z_0000") for tiled datasets
+        cache_dir: Root directory for caching (default: /s3-cache)
 
     Returns:
         Merged Polars DataFrame or None if loading failed
@@ -319,8 +321,8 @@ def load_and_merge_spots_from_s3(
         tile_pattern = re.compile(r'_X_\d+_Y_\d+_Z_\d+$')
         if tile_pattern.search(dataset_name):
             # dataset_name is already a virtual tile dataset - use it as-is
-            cache_dir = Path("/s3-cache") / bucket / dataset_name
-            parquet_file = cache_dir / f"{dataset_name}.parquet"
+            local_cache_dir = Path(cache_dir) / bucket / dataset_name
+            parquet_file = local_cache_dir / f"{dataset_name}.parquet"
             logger.info(
                 f"Virtual tile dataset detected: {dataset_name}, "
                 f"using as-is"
@@ -328,10 +330,10 @@ def load_and_merge_spots_from_s3(
         else:
             # dataset_name is a base dataset - append tile suffix
             tile_suffix = extract_tile_suffix(tile_folder)
-            cache_dir = (
-                Path("/s3-cache") / bucket / f"{dataset_name}_{tile_suffix}"
+            local_cache_dir = (
+                Path(cache_dir) / bucket / f"{dataset_name}_{tile_suffix}"
             )
-            parquet_file = cache_dir / f"{dataset_name}_{tile_suffix}.parquet"
+            parquet_file = local_cache_dir / f"{dataset_name}_{tile_suffix}.parquet"
             logger.info(
                 f"Base dataset with tile: {dataset_name}, tile: {tile_suffix}"
             )
@@ -339,8 +341,8 @@ def load_and_merge_spots_from_s3(
         unmixed_spots_prefix = f"{unmixed_spots_prefix}{tile_folder}/"
         logger.info(f"Loading tile dataset from: {unmixed_spots_prefix}")
     else:
-        cache_dir = Path("/s3-cache") / bucket / dataset_name
-        parquet_file = cache_dir / f"{dataset_name}.parquet"
+        local_cache_dir = Path(cache_dir) / bucket / dataset_name
+        parquet_file = local_cache_dir / f"{dataset_name}.parquet"
 
     # Check if merged parquet file already exists
     if parquet_file.exists():
@@ -394,8 +396,12 @@ def load_and_merge_spots_from_s3(
     logger.info(f"Found unmixed file: {unmixed_key}")
     logger.info(f"Found mixed file: {mixed_key}")
 
-    # 3. Download both files to /tmp
-    with tempfile.TemporaryDirectory() as tmp_dir:
+    # 3. Download both files to cache tmp directory
+    # Create tmp directory in cache instead of system /tmp
+    cache_tmp_dir = Path(cache_dir) / "tmp"
+    cache_tmp_dir.mkdir(parents=True, exist_ok=True)
+    
+    with tempfile.TemporaryDirectory(dir=str(cache_tmp_dir)) as tmp_dir:
         tmp_dir_path = Path(tmp_dir)
 
         # Download unmixed file
@@ -451,7 +457,7 @@ def load_and_merge_spots_from_s3(
         # 7. Save merged result as parquet to cache
         try:
             # Ensure cache directory exists
-            cache_dir.mkdir(parents=True, exist_ok=True)
+            local_cache_dir.mkdir(parents=True, exist_ok=True)
 
             logger.info(f"Saving merged DataFrame to parquet: {parquet_file}")
             df_merged.write_parquet(parquet_file, compression="snappy")

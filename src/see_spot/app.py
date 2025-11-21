@@ -38,10 +38,10 @@ def load_config():
         str(Path.home() / '.seespot' / 'config.yaml'),
         str(Path('/etc/seespot/config.yaml')),
     ]
-    
+
     # Get a logger for this function (avoid using module-level logger during import)
     config_logger = logging.getLogger(__name__)
-    
+
     for config_path in config_paths:
         if config_path and Path(config_path).exists():
             try:
@@ -55,7 +55,7 @@ def load_config():
                     return loaded_config
             except Exception as e:
                 config_logger.warning(f"Failed to load config from {config_path}: {e}")
-    
+
     # Return defaults if no config file found
     config_logger.info("No config file found, using defaults")
     return {
@@ -395,7 +395,8 @@ async def get_real_spots_data(
                 DATA_PREFIX,
                 unmixed_spots_prefix,
                 valid_spots_only,
-                tile_folder=tile_folder
+                tile_folder=tile_folder,
+                cache_dir=str(S3_CACHE_BASE)
             )
             if df_polars is None:
                 logger.error("Failed to load merged DataFrame from S3/cache.")
@@ -1113,12 +1114,13 @@ async def download_dataset(request: Request):
                 try:
                     # Load and merge this tile's data
                     merged_df = load_and_merge_spots_from_s3(
-                        S3_BUCKET, dataset_name, spots_key, tile_folder=tile_folder
+                        S3_BUCKET, dataset_name, spots_key, tile_folder=tile_folder,
+                        cache_dir=str(S3_CACHE_BASE)
                     )
                     if merged_df is not None:
                         logger.info(f"Successfully created parquet for tile {virtual_dataset_name}")
                         parquet_path = (
-                            Path("/s3-cache") / S3_BUCKET / virtual_dataset_name /
+                            S3_CACHE_BASE / S3_BUCKET / virtual_dataset_name /
                             f"{virtual_dataset_name}.parquet"
                         )
                         if parquet_path.exists():
@@ -1151,7 +1153,7 @@ async def download_dataset(request: Request):
             
             # Create the merged parquet file
             try:
-                merged_df = load_and_merge_spots_from_s3(S3_BUCKET, dataset_name, spots_key)
+                merged_df = load_and_merge_spots_from_s3(S3_BUCKET, dataset_name, spots_key, cache_dir=str(S3_CACHE_BASE))
                 if merged_df is not None:
                     logger.info(f"Successfully created merged parquet file for dataset {dataset_name}")
                 else:
