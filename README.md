@@ -86,15 +86,19 @@ When downloading a tiled dataset, the system automatically:
 - Names them as: `{dataset_name}_X_####_Y_####_Z_####`
 
 ## Changelog
-+ v0.6.9 (11-17-2025)
-  - loading of single tile dataset 
++ v0.7.0 (11-21-2025)
+  - Big feature: loading of single tile dataset (non-fused)
     - Looks in spectral_unmixing, if "Tile" subfolders" load pkl files from each and show them in the app
+    - Creates virtual datasets for each tile, shown in dataset management table
+  - Big feature: use lasso to make multi selection neuroglancer annotations
+  - Legend series visibilty persists across app interactions
+  - class balanced sampling option
+  - removed spots in unmixed hidden by default
   - load mixed table first
   - dye lines plotting
   - display filters (r dist) refactor
   - Better dataset management (with filters) use DataTables js
-  - add spot persistent when clicked
-  - Big feature: use lasso to make multi selection neuroglancer annotations
+  - add spot persistent marker when clicked
 + v0.5.0 (09-19-2025)
   + backend downloads mixed + unmixed tables, merges and saves as .parquet (massive compression)
   + polars for dataframe manipulation (huge speedup)
