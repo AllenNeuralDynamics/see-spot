@@ -12,6 +12,7 @@ document.addEventListener('DOMContentLoaded', function () {
     const nextChannelButton = document.getElementById('next_channel_pair');
     const currentChannelDisplay = document.getElementById('current_channel_display');
     const sampleSizeInput = document.getElementById('sample-size-input');
+    const samplingTypeSelect = document.getElementById('sampling-type-select');
     const resampleButton = document.getElementById('resample_button');
     const sampleSizeNote = document.getElementById('sample_size_note');
     const sampleSizeIcon = document.getElementById('sample_size_icon');
@@ -54,11 +55,13 @@ document.addEventListener('DOMContentLoaded', function () {
     let channelPairs = [];
     let currentPairIndex = 0;
     let currentSampleSize = parseInt(sampleSizeInput.value) || 10000;
+    let samplingType = 'class_balanced'; // 'class_balanced' or 'random'
     let highlightReassigned = false;
     let highlightRemoved = false;
     let displayChanMode = 'mixed'; // 'unmixed' or 'mixed'
     let isNeuroglancerMode = false;
     let showDyeLines = false; // Toggle state for dye lines
+    let channelVisibilityState = {}; // Track user's manual legend selections
     let spotDetails = {}; // Will store the spot details for neuroglancer lookup
     let fusedS3Paths = {}; // Will store the fused S3 paths from the API
     let summaryStats = null; // Will store the summary stats from the API
@@ -671,25 +674,31 @@ document.addEventListener('DOMContentLoaded', function () {
         }
         
         currentSampleSize = newSampleSize;
+        const selectedValue = samplingTypeSelect.value;
+        samplingType = selectedValue; // Get current sampling type
+        console.log(`Resample clicked: dropdown value = ${selectedValue}, samplingType = ${samplingType}, displayChanMode = ${displayChanMode}`);
+        console.log(`Dropdown element:`, samplingTypeSelect);
         updateSampleSizeNote(currentSampleSize);
         
         // Show loading state
         myChart.showLoading({
-            text: 'Loading new sample...',
+            text: `Loading new sample (${samplingType})...`,
             maskColor: 'rgba(255, 255, 255, 0.8)',
             fontSize: 14
         });
         
-        // Fetch data with new sample size
+        // Fetch data with new sample size and sampling type
         fetchData(currentSampleSize, false);
     });
 
     // Handle refresh button click (force reload data from server)
-    refreshButton.addEventListener('click', function() {
-        if (confirm("This will reload data from the server. Continue?")) {
-            refreshData(true);
-        }
-    });
+    if (refreshButton) {
+        refreshButton.addEventListener('click', function() {
+            if (confirm("This will reload data from the server. Continue?")) {
+                refreshData(true);
+            }
+        });
+    }
 
     // Add function for refresh button
     function refreshData(forceRefresh = true) {
@@ -735,8 +744,8 @@ document.addEventListener('DOMContentLoaded', function () {
     // Fetch data function
     function fetchData(sampleSize, forceRefresh = false) {
         const validSpotsOnly = false; // validSpotToggle.checked; // Toggle disabled
-        const url = `/api/real_spots_data?sample_size=${sampleSize}${forceRefresh ? '&force_refresh=true' : ''}${validSpotsOnly ? '&valid_spots_only=true' : '&valid_spots_only=false'}`;
-        console.log(`Fetching data with URL: ${url}`);
+        const url = `/api/real_spots_data?sample_size=${sampleSize}&sampling_type=${samplingType}&display_chan=${displayChanMode}${forceRefresh ? '&force_refresh=true' : ''}${validSpotsOnly ? '&valid_spots_only=true' : '&valid_spots_only=false'}`;
+        console.log(`Fetching data with URL: ${url} (sampling: ${samplingType}, display: ${displayChanMode})`);
         
         fetch(url)
             .then(response => {
@@ -1226,10 +1235,17 @@ document.addEventListener('DOMContentLoaded', function () {
             return a.localeCompare(b);
         });
         
-        const series = sortedChannels.map(channel => ({
-            name: channel, // Remove the Mixed/Unmixed prefix from individual labels
-            type: 'scatter',
-            data: seriesData[channel].map(point => {
+        const series = sortedChannels.map(channel => {
+            // Start with series hidden if it's "Removed" in unmixed mode
+            const isRemovedSeries = channel === 'Removed';
+            const shouldHideByDefault = isRemovedSeries && displayChanMode === 'unmixed';
+            
+            return {
+                name: channel, // Remove the Mixed/Unmixed prefix from individual labels
+                type: 'scatter',
+                // Hide "Removed" series by default in unmixed mode
+                selected: !shouldHideByDefault,
+                data: seriesData[channel].map(point => {
                 const spotId = point.value[4];
                 const isClicked = neuroglancerClickedSpots.has(spotId);
                 const baseSize = (channel === 'Removed' ? 8 : 5) * markerSizeMultiplier;
@@ -1346,7 +1362,8 @@ document.addEventListener('DOMContentLoaded', function () {
             },
             // Use fixed color for the legend
             color: COLORS[channel] || COLORS.default
-        }));
+        };
+        });
         
         // Configuration for slider positioning and styling
         const sliderConfig = {
@@ -1521,7 +1538,16 @@ document.addEventListener('DOMContentLoaded', function () {
                     fontSize: 14
                 },
                 selected: sortedChannels.reduce((acc, chan) => {
-                    acc[chan] = true; // Use channel name without prefix
+                    // Check if user has manually set preference for this channel
+                    if (channelVisibilityState.hasOwnProperty(chan)) {
+                        // Use user's preference
+                        acc[chan] = channelVisibilityState[chan];
+                    } else {
+                        // Apply default behavior: hide "Removed" by default in unmixed mode
+                        const isRemovedSeries = chan === 'Removed';
+                        const shouldHideByDefault = isRemovedSeries && displayChanMode === 'unmixed';
+                        acc[chan] = !shouldHideByDefault;
+                    }
                     return acc;
                 }, {})
             },
@@ -1665,6 +1691,13 @@ document.addEventListener('DOMContentLoaded', function () {
                     addSpotToTable(itemData, currentLabel);
                 }
             }
+        });
+
+        // Capture legend selection changes to persist user preferences
+        myChart.on('legendselectchanged', function (params) {
+            console.log('Legend selection changed:', params.selected);
+            // Update our state tracking with user's selections
+            channelVisibilityState = Object.assign({}, params.selected);
         });
 
         // Brush (lasso) selection event
@@ -2079,6 +2112,13 @@ document.addEventListener('DOMContentLoaded', function () {
         
         // Update chart with new channel display mode
         updateChart();
+    });
+    
+    // Event listener for sampling type select
+    samplingTypeSelect.addEventListener('change', function() {
+        samplingType = this.value;
+        console.log(`Sampling type changed to: ${samplingType}`);
+        // Note: Does not automatically resample - user must click Resample button
     });
 
     // Event listener for highlight removed toggle

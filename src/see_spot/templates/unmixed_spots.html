@@ -658,13 +658,18 @@
             </div>
             
             <div id="spots_controls">
-                <div id="sample_controls" style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
+                <div id="sample_controls" style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap;">
                     <label for="sample-size-input">Sample Size:</label>
                     <input type="number" id="sample-size-input" value="5000" min="100" max="100000" style="width: 100px;">
+                    <label for="sampling-type-select">Sampling:</label>
+                    <select id="sampling-type-select" style="padding: 5px;">
+                        <option value="class_balanced" selected>Class Balanced</option>
+                        <option value="random">Random</option>
+                    </select>
                     <button id="resample_button">Resample Data</button>
-                    <button id="refresh_button" title="Reload data from source" style="background-color: #e3f2fd; border-color: #2196f3;">
+                    <!-- <button id="refresh_button" title="Reload data from source" style="background-color: #e3f2fd; border-color: #2196f3;">
                         <span style="display: inline-block; transform: rotate(90deg);">↻</span> Refresh Cache
-                    </button>
+                    </button> -->
                 </div>
                 <!-- <div id="valid_spot_controls" style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
                     <label for="valid_spot_toggle">Valid Spots Only:</label>

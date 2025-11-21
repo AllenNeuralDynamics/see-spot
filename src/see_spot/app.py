@@ -10,6 +10,7 @@ import logging
 import os
 from pathlib import Path
 import polars as pl
+import pandas as pd
 import itertools
 from typing import List, Tuple, Dict, Any
 import yaml
@@ -300,10 +301,13 @@ def calculate_sankey_data(df: Any) -> Dict[str, Any]:
 async def get_real_spots_data(
     sample_size: int = SAMPLE_SIZE,
     force_refresh: bool = False,
-    valid_spots_only: bool = False
+    valid_spots_only: bool = False,
+    sampling_type: str = "class_balanced",
+    display_chan: str = "mixed"
 ):
     logger.info(f"Real spots data requested with sample size: {sample_size}, "
-                f"force_refresh: {force_refresh}, valid_spots_only: {valid_spots_only}")
+                f"force_refresh: {force_refresh}, valid_spots_only: {valid_spots_only}, "
+                f"sampling_type: {sampling_type}, display_chan: {display_chan}")
 
     # Check if a dataset has been selected
     if DATA_PREFIX is None:
@@ -452,7 +456,53 @@ async def get_real_spots_data(
     # 4. Subsample the data
     if len(df) > sample_size:
         logger.info(f"Subsampling DataFrame from {len(df)} to {sample_size} rows.")
-        plot_df = df.sample(n=sample_size, random_state=None).copy()
+        
+        if sampling_type == "class_balanced":
+            # Class-balanced sampling: sample equally from each channel
+            # Use the appropriate channel column based on display mode
+            channel_col = 'chan' if display_chan == 'mixed' else 'unmixed_chan'
+            logger.info(f"Using class-balanced sampling on column: {channel_col}")
+            
+            # Get unique channels and their counts
+            unique_channels = df[channel_col].unique()
+            num_channels = len(unique_channels)
+            samples_per_channel = sample_size // num_channels
+            
+            logger.info(f"Found {num_channels} unique channels, sampling {samples_per_channel} per channel")
+            
+            # Sample from each channel
+            sampled_dfs = []
+            import secrets
+            for channel in unique_channels:
+                channel_df = df[df[channel_col] == channel]
+                n_samples = min(len(channel_df), samples_per_channel)
+                random_seed = secrets.randbelow(2**32)
+                sampled = channel_df.sample(n=n_samples, random_state=random_seed)
+                sampled_dfs.append(sampled)
+                logger.info(f"Channel {channel}: sampled {n_samples} from {len(channel_df)} spots")
+            
+            # Concatenate all samples
+            plot_df = pd.concat(sampled_dfs, ignore_index=True)
+            
+            # If we're short of target sample size, add random samples to fill
+            if len(plot_df) < sample_size:
+                remaining = sample_size - len(plot_df)
+                # Get spots not already sampled
+                remaining_df = df[~df.index.isin(plot_df.index)]
+                if len(remaining_df) > 0:
+                    random_seed = secrets.randbelow(2**32)
+                    additional = remaining_df.sample(n=min(remaining, len(remaining_df)), random_state=random_seed)
+                    plot_df = pd.concat([plot_df, additional], ignore_index=True)
+                    logger.info(f"Added {len(additional)} additional random samples to reach target")
+            
+            plot_df = plot_df.copy()
+            logger.info(f"Class-balanced sampling complete: {len(plot_df)} total samples")
+        else:
+            # Random sampling
+            import secrets
+            random_seed = secrets.randbelow(2**32)
+            plot_df = df.sample(n=sample_size, random_state=random_seed).copy()
+            logger.info(f"Random sampling with seed: {random_seed}")
     else:
         plot_df = df.copy()
     logger.info(f"Plotting DataFrame shape: {plot_df.shape}")
@@ -516,7 +566,8 @@ async def get_real_spots_data(
         else:
             spot_details = {
                 str(int(row['spot_id'])): {
-                    col: row[col] for col in available_detail_cols if col != 'spot_id'
+                    col: (row[col].item() if hasattr(row[col], 'item') else row[col])
+                    for col in available_detail_cols if col != 'spot_id'
                 }
                 for _, row in spot_details_df.iterrows()
             }
@@ -549,6 +600,11 @@ async def get_real_spots_data(
     # 8. Convert DataFrame to list of records (dictionaries)
     try:
         data_for_frontend = plot_df_subset.to_dict(orient='records')
+        # Convert numpy types to native Python types for JSON serialization
+        for record in data_for_frontend:
+            for key, value in record.items():
+                if hasattr(value, 'item'):  # numpy scalar
+                    record[key] = value.item()
         logger.info(f"Prepared {len(data_for_frontend)} records for frontend.")
     except Exception as e:
         logger.error(f"Error converting DataFrame to dict: {e}", exc_info=True)
@@ -662,13 +718,41 @@ async def create_neuroglancer_link(request: Request):
         cross_section_scale,
     )
 
-    # Determine JSON file name (env override allowed) and full S3 path
-    ng_json_filename = os.getenv(
-        "SEE_SPOT_NG_JSON_NAME", "phase_correlation_stitching_neuroglancer.json"
-    )
-    ng_json_path = f"s3://{S3_BUCKET}/{DATA_PREFIX}/{ng_json_filename}"
-    s3_key_for_json = f"{DATA_PREFIX}/{ng_json_filename}"  # key relative to bucket
-    logger.info("Constructed Neuroglancer JSON path: %s", ng_json_path)
+    # Determine dataset context (tile-specific JSONs live under image_spot_detection)
+    import re
+
+    tile_pattern = re.compile(r"_X_\d+_Y_\d+_Z_\d+$")
+    tile_match = tile_pattern.search(DATA_PREFIX) if DATA_PREFIX else None
+    base_dataset_name = DATA_PREFIX
+    tile_folder = None
+
+    if tile_match and DATA_PREFIX:
+        parts = DATA_PREFIX.rsplit('_', 6)
+        if len(parts) > 1:
+            base_dataset_name = parts[0]
+            tile_suffix = '_'.join(parts[1:])
+            tile_folder = f"Tile_{tile_suffix}"
+            logger.info(
+                "Detected tile dataset for Neuroglancer request | base=%s tile=%s",
+                base_dataset_name,
+                tile_folder,
+            )
+
+    # Determine JSON file name (env override allowed for non-tile datasets) and full S3 path
+    if tile_folder:
+        ng_json_filename = f"{tile_folder}_spot_annotation_ng_link.json"
+        s3_key_for_json = (
+            f"{base_dataset_name}/image_spot_detection/{ng_json_filename}"
+        )
+        ng_json_path = f"s3://{S3_BUCKET}/{s3_key_for_json}"
+        logger.info("Using tile-specific Neuroglancer JSON: %s", ng_json_path)
+    else:
+        ng_json_filename = os.getenv(
+            "SEE_SPOT_NG_JSON_NAME", "phase_correlation_stitching_neuroglancer.json"
+        )
+        ng_json_path = f"s3://{S3_BUCKET}/{DATA_PREFIX}/{ng_json_filename}"
+        s3_key_for_json = f"{DATA_PREFIX}/{ng_json_filename}"  # key relative to bucket
+        logger.info("Using default Neuroglancer JSON: %s", ng_json_path)
 
     # Check existence of JSON on S3 (metadata only) for better diagnostics
     json_metadata = None
@@ -692,7 +776,20 @@ async def create_neuroglancer_link(request: Request):
         )
 
     # Decide strategy: prefer JSON-based method when file exists; fall back otherwise
-    use_json_method = json_metadata is not None or "merged" in unmixed_spots_filename.lower()
+    if tile_folder:
+        use_json_method = json_metadata is not None
+        if not use_json_method:
+            logger.warning(
+                "Tile-specific Neuroglancer JSON missing: %s | falling back to direct method",
+                ng_json_path,
+            )
+    else:
+        merged_flag = (
+            unmixed_spots_filename.lower().find("merged") != -1
+            if isinstance(unmixed_spots_filename, str)
+            else False
+        )
+        use_json_method = json_metadata is not None or merged_flag
     logger.info("Use JSON method decision: %s", use_json_method)
 
     try:
@@ -711,6 +808,7 @@ async def create_neuroglancer_link(request: Request):
                     annotation_color=annotation_color,
                     spacing=3.0,
                     cross_section_scale=cross_section_scale,
+                    hide_existing_annotations=True,
                 )
                 logger.info("Successfully built Neuroglancer link from JSON")
             except Exception as json_err:

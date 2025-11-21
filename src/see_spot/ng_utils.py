@@ -259,6 +259,7 @@ def create_link_from_json(
     spacing=3.0,
     cross_section_scale=None,
     base_url="https://neuroglancer-demo.appspot.com",
+    hide_existing_annotations=True,
 ):
     """
     Create a Neuroglancer link from an existing JSON file with updated position and annotation.
@@ -273,6 +274,9 @@ def create_link_from_json(
     spacing (float, optional): Spacing for annotations in cross-section view. Default: 3.0
     cross_section_scale (float, optional): Scale for cross-section view. If None, keeps existing value
     base_url (str, optional): Base Neuroglancer URL. Default: "https://neuroglancer-demo.appspot.com"
+
+    hide_existing_annotations (bool, optional): When True, sets existing annotation
+        layers to invisible before adding the new spot annotation. Default: True
 
     Returns:
     --------
@@ -318,55 +322,52 @@ def create_link_from_json(
         state_dict["crossSectionScale"] = cross_section_scale
         print(f"Updated crossSectionScale to: {cross_section_scale}")
 
-    # Find or create annotation layer
-    annotation_layer_found = False
-
-    if "layers" in state_dict:
-        # Look for existing annotation layer
-        for i, layer in enumerate(state_dict["layers"]):
+    # Hide existing annotation layers if requested
+    if hide_existing_annotations and "layers" in state_dict:
+        hidden_layers = 0
+        for layer in state_dict["layers"]:
             if layer.get("type") == "annotation":
-                # Update existing annotation layer
-                annotation = {
-                    "type": "point",
-                    "id": str(spot_id),
-                    "point": point_annotation,
-                }
+                layer["visible"] = False
+                hidden_layers += 1
+        if hidden_layers:
+            print(f"Hid {hidden_layers} existing annotation layer(s) before adding spot {spot_id}")
 
-                # Update the layer properties
-                state_dict["layers"][i]["name"] = f"Spot {spot_id}"
-                state_dict["layers"][i]["annotationColor"] = annotation_color
-                state_dict["layers"][i][
-                    "crossSectionAnnotationSpacing"
-                ] = spacing
-                state_dict["layers"][i]["annotations"] = [annotation]
+    # Ensure layers list exists and append fresh annotation layer for the selected spot
+    if "layers" not in state_dict or not isinstance(state_dict["layers"], list):
+        state_dict["layers"] = []
 
-                annotation_layer_found = True
-                print(f"Updated existing annotation layer with spot {spot_id}")
-                break
+    spot_layer_name = f"Spot {spot_id}"
 
-        # If no annotation layer exists, create one
-        if not annotation_layer_found:
-            annotation_layer = {
-                "type": "annotation",
-                "name": f"Spot {spot_id}",
-                "tab": "annotations",
-                "visible": True,
-                "annotationColor": annotation_color,
-                "crossSectionAnnotationSpacing": spacing,
-                "projectionAnnotationSpacing": 10,
-                "tool": "annotatePoint",
-                "annotations": [
-                    {
-                        "type": "point",
-                        "id": str(spot_id),
-                        "point": point_annotation,
-                    }
-                ],
+    # Remove any prior custom layer for this spot to avoid duplication
+    state_dict["layers"] = [
+        layer
+        for layer in state_dict["layers"]
+        if not (
+            layer.get("type") == "annotation"
+            and layer.get("name") == spot_layer_name
+            and layer.get("tab") == "annotations"
+        )
+    ]
+
+    annotation_layer = {
+        "type": "annotation",
+        "name": spot_layer_name,
+        "tab": "annotations",
+        "visible": True,
+        "annotationColor": annotation_color,
+        "crossSectionAnnotationSpacing": spacing,
+        "projectionAnnotationSpacing": 10,
+        "tool": "annotatePoint",
+        "annotations": [
+            {
+                "type": "point",
+                "id": str(spot_id),
+                "point": point_annotation,
             }
-            state_dict["layers"].append(annotation_layer)
-            print(f"Created new annotation layer with spot {spot_id}")
-    else:
-        print("Warning: No 'layers' found in Neuroglancer state")
+        ],
+    }
+    state_dict["layers"].append(annotation_layer)
+    print(f"Appended new annotation layer with spot {spot_id}")
 
     # Generate direct URL
     direct_url = create_direct_neuroglancer_url(state_dict, base_url=base_url)
