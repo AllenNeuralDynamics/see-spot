@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SeeSpot - Bleedthrough diagnostics</title>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/nouislider@15.7.1/dist/nouislider.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/nouislider@15.7.1/dist/nouislider.min.js"></script>
+    <link rel="stylesheet" href="/static/css/styles.css">
+    <style>
+        body { font-family: sans-serif; margin: 0; background-color: #fafafa; }
+        #bt-layout { display: flex; align-items: stretch; }
+
+        /* ---- Sidebar ---- */
+        #bt-sidebar {
+            width: 320px;
+            flex-shrink: 0;
+            background-color: #ffffff;
+            border-right: 1px solid #ddd;
+            height: calc(100vh - 48px);
+            overflow-y: auto;
+            padding: 16px;
+            box-sizing: border-box;
+        }
+        .bt-section { margin-bottom: 22px; }
+        .bt-section h3 {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin: 0 0 10px 0;
+            font-size: 15px;
+            color: #333;
+        }
+        .bt-step {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 20px; height: 20px;
+            border-radius: 50%;
+            background-color: #2196F3;
+            color: #fff;
+            font-size: 12px;
+            flex-shrink: 0;
+        }
+        /* No text-transform: uppercase here. CSS uppercasing maps the
+           micro sign to a Greek capital Mu and sigma to Sigma, so
+           "voxel um" and "bright n-sigma" render as mojibake. */
+        .bt-label {
+            display: block;
+            font-size: 11px;
+            letter-spacing: 0.03em;
+            color: #888;
+            margin-bottom: 4px;
+        }
+        .bt-input, .bt-select {
+            width: 100%;
+            box-sizing: border-box;
+            padding: 7px 8px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-size: 12px;
+            font-family: monospace;
+            background-color: #fff;
+        }
+        .bt-btn {
+            width: 100%;
+            padding: 9px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            background-color: #f5f5f5;
+            cursor: pointer;
+            font-size: 13px;
+        }
+        .bt-btn:hover:not(:disabled) { background-color: #ebebeb; }
+        .bt-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+        .bt-btn.primary {
+            background-color: #2196F3;
+            border-color: #2196F3;
+            color: #fff;
+            font-weight: bold;
+        }
+        .bt-btn.primary:hover:not(:disabled) { background-color: #1976D2; }
+
+        .bt-toggle-group { display: flex; gap: 0; }
+        .bt-toggle {
+            flex: 1;
+            padding: 7px 0;
+            text-align: center;
+            font-size: 12px;
+            border: 1px solid #ccc;
+            background-color: #fff;
+            cursor: pointer;
+        }
+        .bt-toggle:first-child { border-radius: 4px 0 0 4px; }
+        .bt-toggle:last-child { border-radius: 0 4px 4px 0; }
+        .bt-toggle + .bt-toggle { border-left: none; }
+        .bt-toggle.active {
+            background-color: #37474F;
+            border-color: #37474F;
+            color: #fff;
+            font-weight: bold;
+        }
+
+        .bt-readout {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            font-size: 12px;
+            color: #555;
+            margin-bottom: 6px;
+        }
+        .bt-readout strong { font-family: monospace; font-size: 14px; color: #222; }
+        .bt-note {
+            background-color: #f0f4f8;
+            border-radius: 4px;
+            padding: 8px;
+            font-size: 11px;
+            color: #555;
+            line-height: 1.45;
+        }
+        .bt-channels { display: flex; flex-wrap: wrap; gap: 6px; }
+        .bt-chan {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 4px 8px;
+            border: 1px solid #ddd;
+            border-radius: 12px;
+            font-size: 12px;
+            cursor: pointer;
+            user-select: none;
+        }
+        .bt-chan .dot { width: 9px; height: 9px; border-radius: 50%; }
+        .bt-chan.off { opacity: 0.4; }
+
+        .bt-region {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 6px;
+            padding: 6px 8px;
+            border: 1px solid #e0e0e0;
+            border-radius: 4px;
+            margin-bottom: 5px;
+            font-family: monospace;
+            font-size: 11px;
+        }
+        .bt-region .rm {
+            cursor: pointer;
+            color: #c62828;
+            font-weight: bold;
+            padding: 0 4px;
+        }
+        .bt-empty {
+            border: 1px dashed #ccc;
+            border-radius: 4px;
+            padding: 18px 10px;
+            text-align: center;
+            color: #999;
+            font-size: 12px;
+        }
+        .bt-help {
+            margin-left: auto;
+            width: 20px; height: 20px;
+            flex-shrink: 0;
+            border-radius: 50%;
+            border: 1px solid #b0bec5;
+            background: #fff;
+            color: #546e7a;
+            font-size: 12px;
+            font-weight: bold;
+            line-height: 1;
+            cursor: pointer;
+            padding: 0;
+        }
+        .bt-help:hover { background: #2196F3; border-color: #2196F3; color: #fff; }
+        .bt-help.on { background: #2196F3; border-color: #2196F3; color: #fff; }
+        #bt-help h4 {
+            margin: 10px 0 3px 0;
+            font-size: 12px;
+            color: #263238;
+        }
+        #bt-help h4:first-child { margin-top: 0; }
+        #bt-help code {
+            background: #e3e9ee;
+            padding: 0 3px;
+            border-radius: 2px;
+            font-size: 10.5px;
+        }
+        #bt-help .bt-offsets {
+            margin-top: 10px;
+            padding: 7px 8px;
+            background: #fff;
+            border-left: 3px solid #2196F3;
+            border-radius: 2px;
+        }
+        .bt-bar {
+            height: 6px;
+            background: #e0e0e0;
+            border-radius: 3px;
+            overflow: hidden;
+        }
+        .bt-bar-fill {
+            height: 100%;
+            width: 0;
+            background: #2196F3;
+            border-radius: 3px;
+            transition: width 0.25s ease;
+        }
+        /* Stages with no countable steps still need to look alive. */
+        .bt-bar-fill.indeterminate {
+            width: 35% !important;
+            animation: bt-slide 1.1s ease-in-out infinite;
+        }
+        @keyframes bt-slide {
+            0% { margin-left: -35%; }
+            100% { margin-left: 100%; }
+        }
+        .bt-param-row { display: flex; gap: 8px; margin-bottom: 8px; }
+        .bt-param-row > div { flex: 1; }
+
+        /* ---- Main ---- */
+        #bt-main {
+            flex-grow: 1;
+            height: calc(100vh - 48px);
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+        }
+        #bt-viewer-bar {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            padding: 10px 16px;
+            background-color: #fff;
+            border-bottom: 1px solid #ddd;
+            flex-wrap: wrap;
+        }
+        #bt-viewer-bar .bt-toggle-group { width: 190px; }
+        #bt-slice-slider { flex: 1; min-width: 160px; max-width: 420px; }
+        .bt-mono { font-family: monospace; font-size: 13px; color: #333; }
+        /* Definite height with the image contained inside it. A
+           min/max pair let the image lay out taller than the wrap,
+           which clipped the volume and hid any region marker that fell
+           outside the visible band. */
+        #bt-viewer-wrap {
+            position: relative;
+            background-color: #111;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 46vh;
+            flex-shrink: 0;
+        }
+        /* height:100% with width:auto, not max-*: a canvas has an
+           intrinsic size, and max-width only ever shrinks it, so the
+           decimated bitmap would otherwise sit tiny in the middle of
+           the frame. This scales it up to the available height and
+           keeps the aspect ratio. */
+        #bt-viewer-img {
+            height: 100%;
+            width: auto;
+            max-width: 100%;
+            object-fit: contain;
+            display: block;
+            cursor: crosshair;
+            /* The slab is deliberately decimated for speed, so let the
+               browser smooth it rather than showing hard blocks. */
+            image-rendering: auto;
+        }
+        #bt-viewer-busy {
+            position: absolute;
+            top: 8px; right: 12px;
+            color: #ccc;
+            font-size: 11px;
+            background: rgba(0, 0, 0, 0.55);
+            padding: 3px 8px;
+            border-radius: 3px;
+            display: none;
+        }
+        #bt-pins { position: absolute; inset: 0; pointer-events: none; }
+        .bt-pin {
+            position: absolute;
+            width: 14px; height: 14px;
+            margin: -7px 0 0 -7px;
+            border: 2px solid #FFC107;
+            border-radius: 50%;
+            box-shadow: 0 0 0 1px rgba(0,0,0,0.6);
+        }
+        .bt-pin span {
+            position: absolute;
+            left: 15px; top: -4px;
+            color: #FFC107;
+            font-size: 10px;
+            font-family: monospace;
+            text-shadow: 0 0 3px #000;
+        }
+        .bt-viewer-hint {
+            position: absolute;
+            left: 10px; bottom: 8px;
+            color: #ccc;
+            font-size: 11px;
+            background: rgba(0,0,0,0.5);
+            padding: 3px 7px;
+            border-radius: 3px;
+        }
+
+        #bt-results { padding: 14px 16px 40px 16px; }
+        #bt-results-header {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            flex-wrap: wrap;
+            margin-bottom: 10px;
+        }
+        .bt-pill {
+            font-size: 12px;
+            padding: 4px 10px;
+            border-radius: 12px;
+            background-color: #ECEFF1;
+            color: #37474F;
+        }
+        .bt-pill.warn { background-color: #FFF3E0; color: #E65100; }
+        .bt-pill.good { background-color: #E8F5E9; color: #2E7D32; }
+        #bt-grid { width: 100%; height: 760px; }
+        #bt-placeholder {
+            text-align: center;
+            color: #9e9e9e;
+            padding: 70px 20px;
+        }
+        #bt-placeholder h2 { font-weight: normal; color: #757575; }
+        #bt-voxel-card {
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            background: #fff;
+            padding: 10px 12px;
+            margin-bottom: 12px;
+            font-size: 12px;
+        }
+        #bt-voxel-card .vals { font-family: monospace; margin: 6px 0; }
+        #bt-figures img { max-width: 100%; border: 1px solid #eee; margin-top: 10px; }
+    .noUi-connect { background: #2196F3; }
+        .noUi-horizontal { height: 8px; }
+        .noUi-horizontal .noUi-handle {
+            width: 18px; height: 18px; right: -9px; top: -6px;
+            border-radius: 50%; box-shadow: none;
+        }
+        .noUi-handle:before, .noUi-handle:after { display: none; }
+    </style>
+</head>
+<body class="has-app-nav">
+    <nav class="app-nav">
+        <a class="app-brand" href="/">
+            <img src="/static/img/see-spot-logo.png" alt="SeeSpot">
+            <span>SeeSpot</span>
+        </a>
+        <div class="nav-tabs">
+            <a class="nav-tab" href="/">Spots</a>
+            <a class="nav-tab active" href="/bleedthrough">Bleedthrough</a>
+        </div>
+        <span class="nav-note">Spot-free bleedthrough analysis &middot; OMEZarr block sampling</span>
+    </nav>
+
+    <div id="bt-layout">
+        <div id="bt-sidebar">
+            <!-- 1 Configure -->
+            <div class="bt-section">
+                <h3><span class="bt-step">1</span> Configure</h3>
+                <span class="bt-label">Cached datasets</span>
+                <select id="bt-dataset-select" class="bt-select" style="margin-bottom:8px;">
+                    <option value="">Loading…</option>
+                </select>
+                <span class="bt-label">OMEZarr S3 base path</span>
+                <input id="bt-path" class="bt-input" style="margin-bottom:8px;"
+                       placeholder="s3://aind-open-data/HCR_…/image_tile_fusing/fused">
+                <button id="bt-detect" class="bt-btn">Detect Channels</button>
+                <div id="bt-detect-status" style="margin-top:8px;font-size:11px;color:#777;"></div>
+                <div id="bt-channels" class="bt-channels" style="margin-top:8px;"></div>
+            </div>
+
+            <!-- 2 Block size -->
+            <div class="bt-section">
+                <h3><span class="bt-step">2</span> Block Size</h3>
+                <span class="bt-label">Analysis pyramid level</span>
+                <select id="bt-level" class="bt-select" style="margin-bottom:10px;"></select>
+                <div class="bt-toggle-group" style="margin-bottom:10px;">
+                    <div class="bt-toggle active" data-mode="cubic">Cubic</div>
+                    <div class="bt-toggle" data-mode="custom">Custom Z/Y/X</div>
+                </div>
+                <div id="bt-cubic">
+                    <div class="bt-readout">
+                        <span>Side length</span><strong><span id="bt-side-val">128</span> vox</strong>
+                    </div>
+                    <div id="bt-side-slider" style="margin:14px 6px 10px 6px;"></div>
+                </div>
+                <div id="bt-custom" style="display:none;">
+                    <div class="bt-param-row">
+                        <div><span class="bt-label">Z</span><input id="bt-size-z" class="bt-input" type="number" value="128"></div>
+                        <div><span class="bt-label">Y</span><input id="bt-size-y" class="bt-input" type="number" value="128"></div>
+                        <div><span class="bt-label">X</span><input id="bt-size-x" class="bt-input" type="number" value="128"></div>
+                    </div>
+                </div>
+                <div class="bt-note" id="bt-size-note">Select a dataset to size the request.</div>
+            </div>
+
+            <!-- 3 Regions -->
+            <div class="bt-section">
+                <h3><span class="bt-step">3</span> Regions</h3>
+                <div class="bt-param-row" style="align-items:flex-end;">
+                    <div>
+                        <span class="bt-label">Grid Z&times;Y&times;X</span>
+                        <div style="display:flex;gap:4px;">
+                            <input id="bt-grid-z" class="bt-input" type="number" value="2" min="1">
+                            <input id="bt-grid-y" class="bt-input" type="number" value="3" min="1">
+                            <input id="bt-grid-x" class="bt-input" type="number" value="3" min="1">
+                        </div>
+                    </div>
+                </div>
+                <button id="bt-fill-grid" class="bt-btn" style="margin-bottom:8px;">
+                    Auto-place grid (<span id="bt-grid-count">18</span>)
+                </button>
+                <div id="bt-region-warn" class="bt-note" style="display:none;margin-bottom:8px;"></div>
+                <div id="bt-region-list" style="max-height:190px;overflow-y:auto;"></div>
+                <button id="bt-clear-regions" class="bt-btn" style="margin-top:6px;display:none;">Clear all</button>
+            </div>
+
+            <!-- 4 Analysis -->
+            <div class="bt-section">
+                <h3>
+                    <span class="bt-step">4</span> Analysis
+                    <button id="bt-help-btn" class="bt-help" title="How the method works">?</button>
+                </h3>
+                <div id="bt-help" class="bt-note" style="display:none;margin-bottom:10px;"></div>
+                <div class="bt-param-row">
+                    <div>
+                        <span class="bt-label">Voxel size µm (lateral)</span>
+                        <input id="bt-voxel-um" class="bt-input" type="number" step="0.0001" placeholder="auto">
+                    </div>
+                    <div>
+                        <span class="bt-label">Window µm</span>
+                        <input id="bt-window-um" class="bt-input" type="number" step="0.01" value="0.93">
+                    </div>
+                </div>
+                <div class="bt-param-row">
+                    <div>
+                        <span class="bt-label">Bright nσ</span>
+                        <input id="bt-bright" class="bt-input" type="number" step="0.1" value="3.0">
+                    </div>
+                    <div>
+                        <span class="bt-label">Sample pts</span>
+                        <input id="bt-sample" class="bt-input" type="number" step="1000" value="12000">
+                    </div>
+                </div>
+                <div class="bt-param-row">
+                    <div>
+                        <span class="bt-label">Signal gate (bright fraction)</span>
+                        <input id="bt-gate" class="bt-input" type="number" step="0.001" value="0.002">
+                    </div>
+                </div>
+                <div class="bt-note" id="bt-null-note"></div>
+            </div>
+
+            <button id="bt-run" class="bt-btn primary" disabled>Run Diagnostics (0)</button>
+            <div id="bt-progress" style="display:none;margin-top:8px;">
+                <div class="bt-bar"><div class="bt-bar-fill" id="bt-bar-fill"></div></div>
+                <div id="bt-progress-text"
+                     style="font-size:11px;color:#666;margin-top:4px;"></div>
+            </div>
+            <button id="bt-figures" class="bt-btn" style="margin-top:8px;display:none;">Download figures</button>
+        </div>
+
+        <div id="bt-main">
+            <div id="bt-viewer-bar">
+                <div class="bt-toggle-group">
+                    <div class="bt-toggle active" data-plane="XY">XY</div>
+                    <div class="bt-toggle" data-plane="ZY">ZY</div>
+                    <div class="bt-toggle" data-plane="ZX">ZX</div>
+                </div>
+                <span class="bt-mono" id="bt-slice-axis">Z</span>
+                <div id="bt-slice-slider"></div>
+                <span class="bt-mono" id="bt-slice-val">0</span>
+                <select id="bt-view-channel" class="bt-select" style="width:auto;"></select>
+                <span class="bt-mono" style="color:#888;">contrast</span>
+                <div id="bt-contrast-slider" style="width:150px;"></div>
+                <span class="bt-mono" id="bt-contrast-val" style="color:#888;">0.5–99.5%</span>
+                <button id="bt-contrast-reset" class="bt-btn"
+                        style="width:auto;padding:4px 10px;font-size:11px;">Auto</button>
+                <div class="bt-toggle-group" style="width:120px;">
+                    <div class="bt-toggle active" data-zoom="fit">Fit</div>
+                    <div class="bt-toggle" data-zoom="full">Full</div>
+                </div>
+                <span class="bt-mono" style="margin-left:auto;color:#888;" id="bt-viewer-dims"></span>
+            </div>
+            <div id="bt-viewer-wrap">
+                <canvas id="bt-viewer-img"></canvas>
+                <div id="bt-pins"></div>
+                <div id="bt-viewer-busy">loading slab…</div>
+                <div class="bt-viewer-hint" id="bt-viewer-hint">Detect channels to load the viewer</div>
+            </div>
+
+            <div id="bt-results">
+                <div id="bt-placeholder">
+                    <h2>Bleedthrough Analysis</h2>
+                    <p>Pick an S3 path &rarr; click the viewer to place one or more blocks &rarr; Run Diagnostics.</p>
+                    <p style="font-size:12px;">Statistics pool across every region you place.</p>
+                </div>
+                <div id="bt-results-body" style="display:none;">
+                    <div id="bt-results-header"></div>
+                    <div id="bt-matrix-wrap">
+                        <div id="bt-matrix-caption"
+                             style="font-size:12px;color:#777;margin:6px 0 2px 2px;"></div>
+                        <div id="bt-matrix" style="width:100%;height:400px;"></div>
+                    </div>
+                    <div id="bt-voxel-card" style="display:none;"></div>
+                    <div id="bt-grid"></div>
+                    <div id="bt-figures-out"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/colors.js"></script>
+    <script src="/static/js/bleedthrough.js"></script>
+</body>
+</html>

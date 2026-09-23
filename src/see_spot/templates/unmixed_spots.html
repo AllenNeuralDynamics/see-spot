@@ -13,9 +13,10 @@
     <!-- Include noUiSlider -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/nouislider@15.7.1/dist/nouislider.min.css">
     <script src="https://cdn.jsdelivr.net/npm/nouislider@15.7.1/dist/nouislider.min.js"></script>
+    <link rel="stylesheet" href="/static/css/styles.css">
     <style>
         body { font-family: sans-serif; display: flex; margin: 0; }
-        #sidebar { width: 260px; flex-shrink: 0; background-color: #ffffff; padding: 15px; height: 100vh; border-right: 1px solid #ddd; overflow-y: auto; display: flex; flex-direction: column; }
+        #sidebar { width: 260px; flex-shrink: 0; background-color: #ffffff; padding: 15px; height: calc(100vh - 48px); border-right: 1px solid #ddd; overflow-y: auto; display: flex; flex-direction: column; }
         #main-content { 
             flex-grow: 1; 
             padding: 20px; 
@@ -454,7 +455,18 @@
         }
     </style>
 </head>
-<body>
+<body class="has-app-nav">
+    <nav class="app-nav">
+        <a class="app-brand" href="/">
+            <img src="/static/img/see-spot-logo.png" alt="SeeSpot">
+            <span>SeeSpot</span>
+        </a>
+        <div class="nav-tabs">
+            <a class="nav-tab active" href="/">Spots</a>
+            <a class="nav-tab" href="/bleedthrough">Bleedthrough</a>
+        </div>
+        <span class="nav-note">Spot unmixing &amp; channel assignment</span>
+    </nav>
     <div id="sidebar">
         <!-- <h2>Navigation</h2>
         <ul>

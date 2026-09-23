@@ -5,6 +5,7 @@ from fastapi.templating import Jinja2Templates
 from datetime import datetime
 from see_spot import ng_utils
 from see_spot import __version__
+import math
 import uvicorn
 import logging
 import os
@@ -24,6 +25,17 @@ from see_spot.s3_utils import (
     load_processing_manifest_from_s3, load_and_merge_spots_from_s3,
     find_processing_manifest, detect_tile_structure, extract_tile_suffix
 )
+
+
+def _sanitize_json(obj):
+    """Recursively replace NaN/Inf with None so the response is JSON-compliant."""
+    if isinstance(obj, dict):
+        return {k: _sanitize_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_json(v) for v in obj]
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return None
+    return obj
 
 
 # Initialize logging using central utility (idempotent)
@@ -82,6 +94,11 @@ templates_dir = current_file_dir / "templates"
 # Mount static files
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
 templates = Jinja2Templates(directory=templates_dir)
+
+# Bleed-through diagnostics page and its API
+from see_spot.bleedthrough_api import router as bleedthrough_router  # noqa: E402
+
+app.include_router(bleedthrough_router)
 
 # Configuration for the spots data
 S3_BUCKET = os.getenv('SEESPOT_BUCKET') or config.get('aws', {}).get('bucket', 'aind-open-data')
@@ -670,7 +687,7 @@ async def get_real_spots_data(
     if sankey_data:
         response["sankey_data"] = sankey_data
 
-    return response
+    return JSONResponse(content=_sanitize_json(response))
 
 
 @app.post("/api/create-neuroglancer-link")
@@ -1006,9 +1023,9 @@ async def create_neuroglancer_multi_annotations(request: Request):
 async def list_datasets():
     """List all available datasets in the local cache, including virtual tile datasets."""
     try:
-        cache_path = Path("/s3-cache") / S3_BUCKET
+        cache_path = S3_CACHE_BASE / S3_BUCKET
         datasets = []
-        
+
         if cache_path.exists():
             for dataset_dir in cache_path.iterdir():
                 if dataset_dir.is_dir() and not dataset_dir.name.startswith('.'):
@@ -1164,7 +1181,7 @@ async def download_dataset(request: Request):
             # Download related files (ratios and summary stats)
             related_files = find_related_files(S3_BUCKET, spots_key, spots_file)
             
-            parquet_file = Path("/s3-cache") / S3_BUCKET / dataset_name / f"{dataset_name}.parquet"
+            parquet_file = S3_CACHE_BASE / S3_BUCKET / dataset_name / f"{dataset_name}.parquet"
             if parquet_file.exists():
                 downloaded_files.append(str(parquet_file))
             
@@ -1209,7 +1226,7 @@ async def set_active_dataset(request: Request):
             return JSONResponse(status_code=400, content={"error": "Dataset name is required"})
         
         # Verify the dataset exists locally
-        cache_path = Path("/s3-cache") / S3_BUCKET / dataset_name
+        cache_path = S3_CACHE_BASE / S3_BUCKET / dataset_name
         if not cache_path.exists():
             return JSONResponse(status_code=404, content={"error": "Dataset not found in local cache"})
         
@@ -1244,7 +1261,42 @@ async def set_active_dataset(request: Request):
 @app.get("/unmixed-spots")
 async def unmixed_spots_page(request: Request):
     logger.info("Unmixed spots page accessed")
-    return templates.TemplateResponse("unmixed_spots.html", {"request": request, "version": __version__})
+    return templates.TemplateResponse(request=request, name="unmixed_spots.html", context={"version": __version__})
+
+
+@app.get("/bleedthrough")
+async def bleedthrough_page(request: Request):
+    """Serve the channel bleed-through diagnostics page."""
+    logger.info("Bleedthrough page accessed")
+    return templates.TemplateResponse(
+        request=request,
+        name="bleedthrough.html",
+        context={"version": __version__},
+    )
+
+
+@app.get("/api/bleedthrough/dataset-paths")
+async def bleedthrough_dataset_paths():
+    """Suggest OMEZarr dataset roots from datasets cached locally.
+
+    Populates the dropdown beside the free-text path field so the long
+    HCR_... prefixes do not have to be typed by hand. Suggests the
+    dataset root rather than a fused subdirectory, because channel
+    detection descends into whichever layout the dataset uses.
+    """
+    cache_path = S3_CACHE_BASE / S3_BUCKET
+    suggestions = []
+    if cache_path.exists():
+        for entry in sorted(cache_path.iterdir()):
+            if not entry.is_dir() or entry.name.startswith("."):
+                continue
+            suggestions.append(
+                {
+                    "dataset": entry.name,
+                    "base_path": f"s3://{S3_BUCKET}/{entry.name}",
+                }
+            )
+    return {"datasets": suggestions, "bucket": S3_BUCKET}
 
 
 if __name__ == '__main__':

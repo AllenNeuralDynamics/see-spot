@@ -2,7 +2,7 @@ from typing import Optional, Dict, List, Any
 import polars as pl
 import pandas as pd  # Keep for compatibility where needed
 import numpy as np
-from see_spot.s3_handler import s3_handler
+from see_spot.s3_handler import s3_handler, DEFAULT_CACHE_DIR
 from pathlib import Path
 import fnmatch
 import io
@@ -298,7 +298,7 @@ def load_and_merge_spots_from_s3(
     unmixed_spots_prefix: str,
     valid_spots_only: bool = True,
     tile_folder: Optional[str] = None,
-    cache_dir: str = "/s3-cache",
+    cache_dir: str = str(DEFAULT_CACHE_DIR),
 ) -> Optional[pl.DataFrame]:
     """
     Load both mixed and unmixed spots files, merge them, cache as parquet, and return merged DataFrame.

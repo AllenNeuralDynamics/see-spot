@@ -6,9 +6,13 @@ Manages connections and operations with AWS S3.
 import os
 import logging
 import boto3
-from botocore.exceptions import ClientError
+from botocore import UNSIGNED
+from botocore.config import Config
+from botocore.exceptions import ClientError, NoCredentialsError
 from pathlib import Path
 from typing import Optional, Union
+
+DEFAULT_CACHE_DIR = Path.home() / ".seespot" / "cache"
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -27,19 +31,133 @@ class S3Handler:
         self.s3_client = None
         self.s3_resource = None
         self.bucket_name = bucket_name
+        self._anon = None
+        self._use_anon = {}
         self.init_s3_client()
 
     def init_s3_client(self):
-        """Initialize the S3 client using credentials from environment variables."""
+        """Build the signed client, or an unsigned one if no credentials."""
         try:
-            # Create S3 client - boto3 will automatically use AWS_ACCESS_KEY_ID,
-            # AWS_SECRET_ACCESS_KEY, and AWS_SESSION_TOKEN from environment
+            session = boto3.session.Session()
+            has_creds = session.get_credentials() is not None
+        except Exception:
+            has_creds = False
+
+        if has_creds:
             self.s3_client = boto3.client("s3")
             self.s3_resource = boto3.resource("s3")
-            logger.info("S3 client initialized successfully")
-        except Exception as e:
-            logger.error(f"Failed to initialize S3 client: {e}")
-            raise
+            logger.info("S3 client initialized with credentials")
+        else:
+            logger.info(
+                "No AWS credentials found; using anonymous access"
+            )
+            self.s3_client = self._anon_client()
+            self.s3_resource = boto3.resource(
+                "s3", config=Config(signature_version=UNSIGNED)
+            )
+
+    def _anon_client(self):
+        """Return the lazily built unsigned S3 client.
+
+        Returns:
+            botocore client configured for unsigned (public) access.
+        """
+        if self._anon is None:
+            self._anon = boto3.client(
+                "s3", config=Config(signature_version=UNSIGNED)
+            )
+        return self._anon
+
+    def _run(self, bucket, operation):
+        """Run an S3 call, retrying unsigned if signed access is refused.
+
+        Credentials that are absent, expired or simply not entitled to a
+        public bucket all surface as 400/401/403 rather than as
+        NoCredentialsError, so the decision is made from the response and
+        then memoised per bucket.
+
+        Args:
+            bucket (str): Bucket the call targets; keys the memo.
+            operation (callable): Takes a boto3 S3 client, returns a result.
+
+        Returns:
+            Whatever ``operation`` returns.
+        """
+        if self.s3_client is None or self._use_anon.get(bucket):
+            return operation(self._anon_client())
+        try:
+            return operation(self.s3_client)
+        except NoCredentialsError:
+            self._use_anon[bucket] = True
+            return operation(self._anon_client())
+        except ClientError as err:
+            meta = err.response.get("ResponseMetadata", {})
+            status = meta.get("HTTPStatusCode")
+            if status not in (400, 401, 403):
+                raise
+            logger.info(
+                "Signed access to '%s' refused (HTTP %s); using anonymous",
+                bucket,
+                status,
+            )
+            self._use_anon[bucket] = True
+            return operation(self._anon_client())
+
+    def is_anonymous(self, bucket_name=None):
+        """Report whether this bucket is being read without signing.
+
+        Reflects the decision ``_run`` memoised, so other layers (the zarr
+        filesystem) can authenticate the same way rather than guessing.
+
+        Args:
+            bucket_name (str, optional): Bucket. Uses the default if None.
+
+        Returns:
+            bool: True when unsigned access is in use for this bucket.
+        """
+        bucket = bucket_name or self.bucket_name
+        return self.s3_client is None or bool(self._use_anon.get(bucket))
+
+    def list_prefixes(self, prefix, bucket_name=None):
+        """List immediate child "directories" under a prefix.
+
+        Uses a delimiter so only CommonPrefixes come back. The flat
+        ``list_objects`` would page through every chunk object beneath a
+        multi-terabyte zarr, which is unusable for enumerating channels.
+
+        Args:
+            prefix (str): Prefix to list under; a trailing "/" is added.
+            bucket_name (str, optional): Bucket. Uses the default if None.
+
+        Returns:
+            list: Child prefix names, without the trailing slash.
+        """
+        bucket = bucket_name or self.bucket_name
+        if not bucket:
+            logger.error("No bucket name provided for list_prefixes.")
+            return []
+        if prefix and not prefix.endswith("/"):
+            prefix = prefix + "/"
+
+        def _call(client):
+            """Page through CommonPrefixes for the given client."""
+            found = []
+            paginator = client.get_paginator("list_objects_v2")
+            pages = paginator.paginate(
+                Bucket=bucket, Prefix=prefix, Delimiter="/"
+            )
+            for page in pages:
+                for entry in page.get("CommonPrefixes", []):
+                    found.append(entry["Prefix"][len(prefix):].rstrip("/"))
+            return found
+
+        try:
+            return self._run(bucket, _call)
+        except Exception as err:
+            logger.error(
+                "Error listing prefixes under '%s': %s", prefix, err
+            )
+            return []
 
     def test_connection(self, bucket_name=None):
         """
@@ -61,7 +179,10 @@ class S3Handler:
 
         try:
             # Try to list objects (limited to 5 for test)
-            response = self.s3_client.list_objects_v2(Bucket=bucket, MaxKeys=5)
+            response = self._run(
+                bucket,
+                lambda c: c.list_objects_v2(Bucket=bucket, MaxKeys=5),
+            )
 
             # Check if we can access the bucket
             if "Contents" in response:
@@ -120,11 +241,10 @@ class S3Handler:
             logger.error("No bucket name provided")
             return []
 
-        try:
-            paginator = self.s3_client.get_paginator("list_objects_v2")
-            objects = []
-
-            # Paginate through results
+        def _call(client):
+            """Page through object keys for the given client."""
+            paginator = client.get_paginator("list_objects_v2")
+            found = []
             for page in paginator.paginate(
                 Bucket=bucket,
                 Prefix=prefix,
@@ -132,7 +252,11 @@ class S3Handler:
             ):
                 if "Contents" in page:
                     for obj in page["Contents"]:
-                        objects.append(obj["Key"])
+                        found.append(obj["Key"])
+            return found
+
+        try:
+            objects = self._run(bucket, _call)
 
             return objects
 
@@ -158,7 +282,9 @@ class S3Handler:
             return None
 
         try:
-            response = self.s3_client.get_object(Bucket=bucket, Key=key)
+            response = self._run(
+                bucket, lambda c: c.get_object(Bucket=bucket, Key=key)
+            )
             return response["Body"].read()
         except Exception as e:
             logger.error(
@@ -185,7 +311,9 @@ class S3Handler:
 
         try:
             # Use head_object to get metadata without downloading the body
-            response = self.s3_client.head_object(Bucket=bucket, Key=key)
+            response = self._run(
+                bucket, lambda c: c.head_object(Bucket=bucket, Key=key)
+            )
             # Return relevant metadata
             return {
                 "ContentLength": response.get("ContentLength"),
@@ -215,7 +343,7 @@ class S3Handler:
         bucket_name: Optional[str] = None,
         local_path: Optional[Union[str, Path]] = None,
         use_cache: bool = True,
-        cache_dir: Union[str, Path] = "/s3-cache",
+        cache_dir: Union[str, Path] = DEFAULT_CACHE_DIR,
     ) -> Optional[Path]:
         """
         Downloads a file from S3, optionally using a local cache.
@@ -292,12 +420,14 @@ class S3Handler:
             effective_local_path.parent.mkdir(parents=True, exist_ok=True)
 
             # Use download_file for efficient transfer to disk
-            self.s3_client.download_file(
-                Bucket=bucket,
-                Key=key,
-                Filename=str(
-                    effective_local_path
-                ),  # download_file expects a string path
+            self._run(
+                bucket,
+                lambda c: c.download_file(
+                    Bucket=bucket,
+                    Key=key,
+                    # download_file expects a string path
+                    Filename=str(effective_local_path),
+                ),
             )
             logger.info(f"Successfully downloaded to: {effective_local_path}")
             return effective_local_path
@@ -336,7 +466,7 @@ class S3Handler:
 
 # Create a global instance for easy access
 # s3_handler = S3Handler('aind-open-data')
-s3_handler = S3Handler("codeocean-s3resultsbucket-1182nktl2bh9f")
+s3_handler = S3Handler("aind-open-data")
 
 
 # Test function that can be called to verify connection
