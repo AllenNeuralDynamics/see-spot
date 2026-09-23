@@ -811,6 +811,55 @@ def plot_density_grid(
     return fig, coeffs
 
 
+def _composite_columns(
+    block_list: Sequence[SampleBlock],
+    source: str,
+    dest: str,
+    background: Union[str, Mapping[str, float], None],
+    z_index: Optional[int],
+    percentile: float,
+    shared_scale: bool,
+) -> List[Tuple[np.ndarray, np.ndarray, float, Dict[str, float]]]:
+    """Normalize the blocks and pick the brightness scale per column.
+
+    Args:
+        block_list: Blocks to lay out as columns.
+        source: Channel rendered in green.
+        dest: Channel rendered in magenta.
+        background: Passed to :func:`normalize_blocks`.
+        z_index: Plane to take from 3-D blocks.
+        percentile: Percentile of the source setting full brightness.
+        shared_scale: Whether one scale covers every column.
+
+    Returns:
+        One ``(z_source, z_dest, vmax, sigmas)`` tuple per column.
+    """
+    if shared_scale:
+        normalized, sigmas, _ = normalize_blocks(block_list, background)
+        planes = [
+            (_plane(block[source], z_index), _plane(block[dest], z_index))
+            for block in normalized
+        ]
+        pooled = np.concatenate([src.reshape(-1) for src, _ in planes])
+        vmax = max(float(np.percentile(pooled, percentile)), 1.0)
+        return [(src, dst, vmax, sigmas) for src, dst in planes]
+
+    columns = []
+    for block in block_list:
+        normalized, sigmas, _ = normalize_blocks(block, background)
+        z_src = _plane(normalized[0][source], z_index)
+        z_dst = _plane(normalized[0][dest], z_index)
+        columns.append(
+            (
+                z_src,
+                z_dst,
+                max(float(np.percentile(z_src, percentile)), 1.0),
+                sigmas,
+            )
+        )
+    return columns
+
+
 def plot_pair_composite(
     blocks: Blocks,
     source: str,
@@ -822,14 +871,20 @@ def plot_pair_composite(
     column_labels: Optional[Sequence[str]] = None,
     title: Optional[str] = None,
     panel_size: float = 4.0,
+    shared_scale: bool = True,
 ) -> Figure:
     """Plot one channel pair as a green-against-magenta composite.
 
-    Each block is normalized by **its own** sigmas, because blocks
-    handed to this function are usually views of one region at
-    different resolutions, where the noise differs. Both channels then
-    share one scale, set by the source, so a destination carrying a
-    leak at coefficient ``a`` renders at ``a`` times the brightness.
+    Blocks become the columns. With ``shared_scale`` (the default) one
+    set of sigmas and one brightness scale cover every column, which is
+    what makes **regions comparable to each other** -- normalizing each
+    region separately would hide exactly the differences between them.
+    Turn it off for blocks at different resolutions, where the noise
+    genuinely differs and each needs its own scale.
+
+    Within a column both channels always share one scale, set by the
+    source, so a destination carrying a leak at coefficient ``a``
+    renders at ``a`` times the brightness.
 
     Neutral grey means the two channels carry equal signal relative to
     their own noise; a green cast means the source is stronger, magenta
@@ -848,6 +903,8 @@ def plot_pair_composite(
         column_labels: One label per block.
         title: Optional replacement for the default figure title.
         panel_size: Width of one column in inches.
+        shared_scale: Normalize every block together and render them
+            on one common brightness scale.
 
     Returns:
         The figure.
@@ -884,14 +941,11 @@ def plot_pair_composite(
         figsize=(panel_size * columns + 4.4, 11.4),
         gridspec_kw={"width_ratios": [1] * columns + [0.95]},
     )
-    first_vmax = 1.0
-    for col, block in enumerate(block_list):
-        normalized, sigmas, _ = normalize_blocks(block, background)
-        z_src = _plane(normalized[0][source], z_index)
-        z_dst = _plane(normalized[0][dest], z_index)
-        vmax = max(float(np.percentile(z_src, percentile)), 1.0)
-        if col == 0:
-            first_vmax = vmax
+    columns_data = _composite_columns(
+        block_list, source, dest, background, z_index, percentile, shared_scale
+    )
+    first_vmax = columns_data[0][2]
+    for col, (z_src, z_dst, vmax, sigmas) in enumerate(columns_data):
 
         im_src = axes[0, col].imshow(
             z_src, cmap=cmap_src, vmin=0, vmax=vmax, interpolation="nearest"

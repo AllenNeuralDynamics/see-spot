@@ -111,6 +111,11 @@ document.addEventListener('DOMContentLoaded', function () {
     // Below this many pooled regions the coefficients are not stable:
     // on a real dataset alpha fell ~3x going from 2 regions to 33.
     const MIN_STABLE_REGIONS = 10;
+    const DEFAULT_BLOCK_SIDE = 128;
+    const MAX_BLOCK_SIDE = 256;
+    // Physical field a default block should cover. Wide enough that the
+    // displaced null sees tissue structure rather than one object.
+    const TARGET_FIELD_UM = 150;
     // Marks drawn per panel. The same voxels are drawn in every panel,
     // so the real cost is this times N^2 -- 3000 x 25 is already 75k
     // marks. ECharts' `large` mode would render more but stops emitting
@@ -149,6 +154,9 @@ document.addEventListener('DOMContentLoaded', function () {
         volumeKey: null,
         volumeLoading: null,
         sharpenTimer: null,
+        targetFieldUm: 0,      // physical field to preserve across levels
+        settingSide: false,    // guard: programmatic slider move
+        sideClamped: false,
         frame: null,           // reused ImageData
         lut: null              // reused value -> byte table
     };
@@ -267,6 +275,12 @@ document.addEventListener('DOMContentLoaded', function () {
                     lvl.shape_zyx[i])).toFixed(1));
             note += '<br>field <b>' + um.join(' &times; ') + ' &micro;m</b>' +
                 ' (z, y, x) at level ' + state.level;
+            if (state.sideClamped) {
+                note += ' &mdash; <b>capped</b> at ' + MAX_BLOCK_SIDE +
+                    ' voxels, so the field is smaller than the ' +
+                    state.targetFieldUm.toFixed(0) +
+                    ' &micro;m carried over';
+            }
         }
         if (state.chunks[0]) {
             note += '<br>reads up to <b>' + readMb.toFixed(0) + ' MB</b>' +
@@ -286,14 +300,79 @@ document.addEventListener('DOMContentLoaded', function () {
      * value here while sampling level 3 would displace the null by 8x
      * the intended distance.
      */
-    function applyLevel() {
+    function applyLevel(previousLevel) {
         const lvl = state.levels[state.level];
         if (!lvl || !state.shape0) { return; }
-        const um = state.voxelZyx[2] *
-            (state.shape0[2] / lvl.shape_zyx[2]);
+        const um = lateralUmAt(state.level);
         voxelUmInput.value = um.toFixed(5);
+
+        // Keep the block covering the same amount of tissue. Without
+        // this, moving one level changes the physical field by the
+        // downsample factor, and the coefficients change with it for a
+        // reason that has nothing to do with the level.
+        //
+        // Derived from a remembered field rather than by scaling the
+        // current side, so a trip out to a level that hits the size cap
+        // and back again returns to where it started.
+        if (previousLevel !== undefined && previousLevel !== state.level) {
+            const want = state.targetFieldUm / um;
+            state.sideClamped = false;
+            if (state.sizeMode === 'cubic') {
+                const stepped = Math.round(want / 16) * 16;
+                const side = Math.max(
+                    16, Math.min(MAX_BLOCK_SIDE, stepped)
+                );
+                state.sideClamped = side !== stepped;
+                state.settingSide = true;
+                sideSlider.noUiSlider.set(side);
+                state.settingSide = false;
+            } else {
+                ['bt-size-z', 'bt-size-y', 'bt-size-x'].forEach((id) => {
+                    const node = el(id);
+                    const side = Math.max(
+                        8, Math.min(MAX_BLOCK_SIDE, Math.round(want))
+                    );
+                    state.sideClamped =
+                        state.sideClamped || side !== Math.round(want);
+                    node.value = side;
+                });
+            }
+        }
         updateNullNote();
         updateSizeNote();
+    }
+
+    /**
+     * Lateral voxel size at a pyramid level, in micrometres.
+     * @param {number} level Level index.
+     * @returns {number} Micrometres per voxel along x.
+     */
+    function lateralUmAt(level) {
+        const lvl = state.levels[level];
+        return state.voxelZyx[2] * (state.shape0[2] / lvl.shape_zyx[2]);
+    }
+
+    /**
+     * Default analysis level: the one giving a workable physical field.
+     *
+     * Level 0 is a poor default here. A 128-voxel block at full
+     * resolution covers about 20 um -- a couple of cells -- where the
+     * fit is dominated by whatever structure happens to be present,
+     * and it is also the most expensive level to read. Aiming for a
+     * field of roughly a tissue-scale distance gives a steadier
+     * coefficient for less I/O.
+     *
+     * @returns {number} Level index.
+     */
+    function chooseAnalysisLevel() {
+        let best = 0;
+        let bestGap = Infinity;
+        for (let i = 0; i < state.levels.length; i++) {
+            const field = lateralUmAt(i) * DEFAULT_BLOCK_SIDE;
+            const gap = Math.abs(field - TARGET_FIELD_UM);
+            if (gap < bestGap) { bestGap = gap; best = i; }
+        }
+        return best;
     }
 
     /** Warn when too few regions are placed for a stable fit. */
@@ -470,10 +549,20 @@ document.addEventListener('DOMContentLoaded', function () {
                 'the two fits is the local coupling.';
             nullNote.style.background = '#E8F5E9';
         } else {
+            const voxel = parseFloat(voxelUmInput.value);
+            // The usual cause at a coarse level is a window smaller
+            // than one voxel: there is then no whole number of voxels
+            // to displace by, and alpha silently becomes unavailable.
+            const hint = voxel > 0
+                ? ' At ' + voxel.toFixed(3) + ' µm per voxel on ' +
+                  'level ' + state.level + ', the window must be at ' +
+                  'least <b>' + voxel.toFixed(2) + ' µm</b> to ' +
+                  'displace by one voxel.'
+                : '';
             nullNote.innerHTML =
-                'Displaced null <b>off</b> &mdash; needs both voxel size ' +
-                'and window. Only the raw observed slope is reported, ' +
-                'which conflates coupling with shared tissue structure.';
+                'Displaced null <b>off</b> &mdash; only the raw observed ' +
+                'slope is reported, which conflates coupling with shared ' +
+                'tissue structure.' + hint;
             nullNote.style.background = '#FFF3E0';
         }
     }
@@ -1187,7 +1276,13 @@ document.addEventListener('DOMContentLoaded', function () {
                         '  ' + um + ' µm/vox  ' +
                         l.shape_zyx.join('×') + '</option>';
                 }).join('');
+                state.level = chooseAnalysisLevel();
                 levelSelect.value = String(state.level);
+                state.targetFieldUm =
+                    DEFAULT_BLOCK_SIDE * lateralUmAt(state.level);
+                state.settingSide = true;
+                sideSlider.noUiSlider.set(DEFAULT_BLOCK_SIDE);
+                state.settingSide = false;
                 applyLevel();
                 detectStatus.innerHTML = data.channels.length +
                     ' channels &middot; ' + data.shape_zyx.join(' x ') +
@@ -1631,6 +1726,30 @@ document.addEventListener('DOMContentLoaded', function () {
         setTimeout(() => matrixChart.resize(), 0);
     }
 
+    /**
+     * Discard the results and go back to the placeholder.
+     *
+     * Results belong to the regions they were computed from, so once
+     * those are gone the charts are stale. Leaving them up invites
+     * reading coefficients that no longer correspond to anything on
+     * screen.
+     */
+    function clearResults() {
+        state.result = null;
+        state.displayRows = [];
+        state.hiddenRegions = new Set();
+        resultsBody.style.display = 'none';
+        placeholder.style.display = 'block';
+        resultsHeader.innerHTML = '';
+        voxelCard.style.display = 'none';
+        voxelCard.innerHTML = '';
+        figuresOut.innerHTML = '';
+        figuresBtn.style.display = 'none';
+        matrixCaption.innerHTML = '';
+        if (chart) { chart.clear(); }
+        if (matrixChart) { matrixChart.clear(); }
+    }
+
     /** Render the results header, region toggles and the grid. */
     function renderResults() {
         const result = state.result;
@@ -1937,6 +2056,12 @@ document.addEventListener('DOMContentLoaded', function () {
     });
     sideSlider.noUiSlider.on('update', (values) => {
         state.side = parseInt(values[0], 10);
+        // A deliberate change redefines the field to preserve; a
+        // programmatic one is just the level conversion echoing back.
+        if (!state.settingSide && state.levels.length) {
+            state.targetFieldUm = state.side * lateralUmAt(state.level);
+            state.sideClamped = false;
+        }
         updateSizeNote();
     });
 
@@ -1995,8 +2120,9 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     levelSelect.addEventListener('change', function () {
+        const previous = state.level;
         state.level = parseInt(this.value, 10) || 0;
-        applyLevel();
+        applyLevel(previous);
     });
 
     /** Keep the grid button's count in step with the inputs. */
@@ -2045,6 +2171,7 @@ document.addEventListener('DOMContentLoaded', function () {
     viewChannel.addEventListener('change', refreshView);
     clearRegionsBtn.addEventListener('click', function () {
         state.regions = [];
+        clearResults();
         updateRegions();
         drawPins();
     });

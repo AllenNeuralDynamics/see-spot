@@ -21,6 +21,7 @@ Two properties of the analysis shape almost everything here:
   get wrong.
 """
 
+import inspect
 import logging
 import uuid
 from collections import OrderedDict
@@ -39,9 +40,7 @@ from fastapi.responses import JSONResponse, Response  # noqa: E402
 from PIL import Image  # noqa: E402
 from starlette.concurrency import run_in_threadpool  # noqa: E402
 
-# The newer module: same analysis core, plus plot_pair_composite's
-# shared_scale so region columns stay comparable.
-from see_spot import bleedthrough_new as bt  # noqa: E402
+from see_spot import bleedthrough as bt  # noqa: E402
 from see_spot import ng_utils, zarr_reader  # noqa: E402
 from see_spot.zarr_store import ZarrMetadataError  # noqa: E402
 
@@ -51,7 +50,7 @@ router = APIRouter(prefix="/api/bleedthrough", tags=["bleedthrough"])
 
 DEFAULT_SAMPLE = 12000
 DEFAULT_BRIGHT_FRACTION = 0.5
-DEFAULT_WINDOW_UM = 0.93
+DEFAULT_WINDOW_UM = 2.0
 # Least share of bright voxels for a region to count as tissue.
 # Gaussian noise alone puts ~0.13% of voxels above 3 sigma, so this
 # sits just above that.
@@ -905,7 +904,9 @@ async def grid(payload: Dict[str, Any]):
     info = channels[0].info
     level = max(0, min(level, len(info.levels) - 1))
     shape = info.levels[level].shape_zyx
+    chunks = info.levels[level].chunks_zyx
     scale = zarr_reader.level_scale_factors(info, level)
+    align = bool(body.get("align_to_chunks", True))
 
     per_axis = []
     for axis in range(3):
@@ -917,14 +918,27 @@ async def grid(payload: Dict[str, Any]):
         if high < low:
             low = high = extent // 2
         if number == 1:
-            per_axis.append([(low + high) // 2])
+            positions = [(low + high) // 2]
         else:
-            per_axis.append(
-                [
-                    int(round(low + (high - low) * i / (number - 1)))
-                    for i in range(number)
-                ]
-            )
+            positions = [
+                int(round(low + (high - low) * i / (number - 1)))
+                for i in range(number)
+            ]
+
+        # Snap so each block sits inside one chunk instead of
+        # straddling two. Measured on a real dataset: 4 chunks per read
+        # down to 1, and the pass twice as fast for identical data.
+        # Free here because a lattice position is arbitrary anyway --
+        # hand-placed regions are never moved.
+        step = int(chunks[axis]) if align else 0
+        if step > 0:
+            snapped = []
+            for centre in positions:
+                start = (max(centre - span // 2, 0) // step) * step
+                start = min(start, max(extent - span, 0))
+                snapped.append(start + span // 2)
+            positions = sorted(set(snapped))
+        per_axis.append(positions)
 
     regions = [
         [
@@ -1069,15 +1083,22 @@ async def figures(payload: Dict[str, Any]):
             entry["blocks"], background=entry["background"]
         )
         labels = [f"region {i}" for i in range(len(entry["blocks"]))]
+        extra = {}
+        # One normalisation across every column, so regions can be
+        # compared with each other; scaling each separately hides
+        # exactly the differences between them. Only some revisions of
+        # bleedthrough.py expose it, so ask before passing it.
+        if (
+            "shared_scale"
+            in inspect.signature(bt.plot_pair_composite).parameters
+        ):
+            extra["shared_scale"] = True
         composites = bt.plot_pair_composites(
             entry["blocks"],
             coefficients=entry["coefficients"],
             background=entry["background"],
             column_labels=labels,
-            # One normalisation across every column, so the regions can
-            # be compared with each other. Scaling each separately would
-            # hide exactly the differences between them.
-            shared_scale=True,
+            **extra,
         )
         return {
             "density_grid": _figure_to_png(grid),
