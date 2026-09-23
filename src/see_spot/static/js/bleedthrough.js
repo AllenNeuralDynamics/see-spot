@@ -26,8 +26,6 @@ document.addEventListener('DOMContentLoaded', function () {
     const regionList = el('bt-region-list');
     const clearRegionsBtn = el('bt-clear-regions');
     const runBtn = el('bt-run');
-    const figuresBtn = el('bt-figures');
-    const figuresOut = el('bt-figures-out');
     const voxelUmInput = el('bt-voxel-um');
     const windowUmInput = el('bt-window-um');
     const brightInput = el('bt-bright');
@@ -63,6 +61,19 @@ document.addEventListener('DOMContentLoaded', function () {
     const gridDom = el('bt-grid');
     const matrixDom = el('bt-matrix');
     const matrixCaption = el('bt-matrix-caption');
+    const compWrap = el('bt-comp-wrap');
+    const compCaption = el('bt-comp-caption');
+    const compSrc = el('bt-comp-src');
+    const compDst = el('bt-comp-dst');
+    const compRegion = el('bt-comp-region');
+    const compZ = el('bt-comp-z');
+    const compZVal = el('bt-comp-zval');
+    const compA = el('bt-comp-a');
+    const compB = el('bt-comp-b');
+    const compM = el('bt-comp-m');
+    const compACap = el('bt-comp-a-cap');
+    const compBCap = el('bt-comp-b-cap');
+    const compKey = el('bt-comp-key');
 
     // Which axis each plane holds fixed, and which it shows (row, col).
     // Indices are into a [z, y, x] triple.
@@ -157,6 +168,7 @@ document.addEventListener('DOMContentLoaded', function () {
         targetFieldUm: 0,      // physical field to preserve across levels
         settingSide: false,    // guard: programmatic slider move
         sideClamped: false,
+        compToken: 0,
         frame: null,           // reused ImageData
         lut: null              // reused value -> byte table
     };
@@ -1727,6 +1739,125 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     /**
+     * Populate the composite controls for a finished run.
+     *
+     * Defaults to the pair with the strongest coupling, since that is
+     * the one worth looking at first.
+     *
+     * @param {object} result Payload from /api/bleedthrough/run.
+     */
+    function setupComposite(result) {
+        const names = result.channels;
+        let best = [names[0], names[names.length - 1]];
+        let bestAlpha = -Infinity;
+        names.forEach((src) => {
+            names.forEach((dst) => {
+                if (src === dst) { return; }
+                const entry = result.coefficients[src + '|' + dst] || {};
+                const alpha = entry.alpha;
+                if (alpha !== null && alpha !== undefined &&
+                    alpha > bestAlpha) {
+                    bestAlpha = alpha;
+                    best = [src, dst];
+                }
+            });
+        });
+
+        const options = (selected) => names.map((n) =>
+            '<option value="' + n + '"' +
+            (n === selected ? ' selected' : '') + '>' + n + '</option>'
+        ).join('');
+        compSrc.innerHTML = options(best[0]);
+        compDst.innerHTML = options(best[1]);
+        compRegion.innerHTML = result.regions.map((r) =>
+            '<option value="' + r.index + '">#' + r.index +
+            '  z' + r.center[0] + ' y' + r.center[1] +
+            ' x' + r.center[2] + '</option>'
+        ).join('');
+
+        const depth = result.block_shape[0];
+        if (compZ.noUiSlider) { compZ.noUiSlider.destroy(); }
+        noUiSlider.create(compZ, {
+            start: [Math.floor(depth / 2)],
+            connect: [true, false],
+            step: 1,
+            range: { min: 0, max: Math.max(depth - 1, 1) },
+            format: { to: (v) => Math.round(v), from: (v) => Number(v) }
+        });
+        compZ.noUiSlider.on('update', (values) => {
+            compZVal.textContent = 'plane ' + values[0] + ' of ' + depth;
+        });
+        compZ.noUiSlider.on('set', loadComposite);
+
+        compWrap.style.display = 'block';
+        compCaption.innerHTML =
+            'Each channel divided by its own robust sigma &mdash; the same ' +
+            'sigmas the density grid uses, pooled over every block &mdash; ' +
+            'then both shown on <b>one</b> scale set by the source. So ' +
+            '<b>neutral grey means equal signal relative to each ' +
+            'channel’s own noise</b>, green means the source is ' +
+            'stronger and magenta the destination. The background level ' +
+            'is taken per block, so a block sitting above the pooled ' +
+            'median still shows its structure instead of clipping.';
+        loadComposite();
+    }
+
+    /** Fetch and show the current composite selection. */
+    function loadComposite() {
+        if (!state.result) { return; }
+        const source = compSrc.value;
+        const dest = compDst.value;
+        if (source === dest) {
+            compKey.innerHTML =
+                'Pick two <b>different</b> channels: a channel against ' +
+                'itself is grey everywhere by construction.';
+            compKey.style.background = '#FFF3E0';
+            return;
+        }
+        const token = ++state.compToken;
+        fetch('/api/bleedthrough/composite', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                run_id: state.result.run_id,
+                source: source,
+                dest: dest,
+                region: parseInt(compRegion.value, 10) || 0,
+                z_index: compZ.noUiSlider
+                    ? parseInt(compZ.noUiSlider.get(), 10) : null
+            })
+        })
+            .then((r) => r.json())
+            .then((data) => {
+                if (token !== state.compToken) { return; }
+                if (data.error) { toast(data.error, 'error'); return; }
+                compA.src = data.source_png;
+                compB.src = data.dest_png;
+                compM.src = data.merge_png;
+                compACap.innerHTML = source + ' source &middot; green';
+                compBCap.innerHTML = dest + ' destination &middot; magenta';
+
+                const entry = state.result.coefficients[
+                    source + '|' + dest] || {};
+                const alpha = entry.alpha;
+                compKey.style.background = '#f0f4f8';
+                compKey.innerHTML =
+                    'Scale 0&ndash;<b>' + data.vmax + ' &sigma;</b> ' +
+                    '&middot; 1&sigma; = ' + data.sigmas[source] +
+                    ' counts (' + source + '), ' + data.sigmas[dest] +
+                    ' counts (' + dest + ') &middot; ' +
+                    data.shape.join('&times;') + ' voxels' +
+                    (alpha === null || alpha === undefined ? ''
+                        : ' &middot; this pair fits <b>&alpha; = ' +
+                          alpha.toFixed(3) + '</b>') +
+                    '<br>Bright in both and co-located reads as grey, but ' +
+                    'that is leakage <i>or</i> genuine co-expression &mdash; ' +
+                    'this view cannot separate them.';
+            })
+            .catch((e) => toast('Composite failed: ' + e.message, 'error'));
+    }
+
+    /**
      * Discard the results and go back to the placeholder.
      *
      * Results belong to the regions they were computed from, so once
@@ -1738,16 +1869,30 @@ document.addEventListener('DOMContentLoaded', function () {
         state.result = null;
         state.displayRows = [];
         state.hiddenRegions = new Set();
+
+        // Dispose rather than clear, and before hiding the container:
+        // clearing a chart whose container is already display:none
+        // empties the option but can leave the last frame on the
+        // canvas, which then flashes back when results next appear.
+        if (chart) { chart.dispose(); chart = null; }
+        if (matrixChart) { matrixChart.dispose(); matrixChart = null; }
+        gridDom.innerHTML = '';
+        matrixDom.innerHTML = '';
+
+        compWrap.style.display = 'none';
+        compCaption.innerHTML = '';
+        compKey.innerHTML = '';
+        compA.removeAttribute('src');
+        compB.removeAttribute('src');
+        compM.removeAttribute('src');
+        if (compZ.noUiSlider) { compZ.noUiSlider.destroy(); }
+
         resultsBody.style.display = 'none';
         placeholder.style.display = 'block';
         resultsHeader.innerHTML = '';
         voxelCard.style.display = 'none';
         voxelCard.innerHTML = '';
-        figuresOut.innerHTML = '';
-        figuresBtn.style.display = 'none';
         matrixCaption.innerHTML = '';
-        if (chart) { chart.clear(); }
-        if (matrixChart) { matrixChart.clear(); }
     }
 
     /** Render the results header, region toggles and the grid. */
@@ -1755,7 +1900,6 @@ document.addEventListener('DOMContentLoaded', function () {
         const result = state.result;
         placeholder.style.display = 'none';
         resultsBody.style.display = 'block';
-        figuresBtn.style.display = 'block';
 
         const misaligned = Object.entries(result.registration || {})
             .filter(([, v]) => v.conclusive && !v.aligned);
@@ -1817,6 +1961,7 @@ document.addEventListener('DOMContentLoaded', function () {
         });
 
         renderMatrix(result);
+        setupComposite(result);
 
         // Keep panels roughly square as the channel count grows.
         gridDom.style.height =
@@ -1886,7 +2031,6 @@ document.addEventListener('DOMContentLoaded', function () {
         runBtn.disabled = true;
         runBtn.textContent = 'Running\u2026';
         showProgress({ stage: 'queued', done: 0, total: 0 });
-        figuresOut.innerHTML = '';
         state.hiddenRegions = new Set();
 
         fetch('/api/bleedthrough/run', {
@@ -1989,34 +2133,6 @@ document.addEventListener('DOMContentLoaded', function () {
             tick();
         });
     }
-
-    figuresBtn.addEventListener('click', function () {
-        if (!state.result) { return; }
-        figuresBtn.disabled = true;
-        figuresBtn.textContent = 'Rendering…';
-        fetch('/api/bleedthrough/figures', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ run_id: state.result.run_id })
-        })
-            .then((r) => r.json())
-            .then((data) => {
-                if (data.error) { toast(data.error, 'error'); return; }
-                let html = '<h3 style="font-size:14px;">Density grid</h3>' +
-                    '<img src="' + data.density_grid + '">';
-                Object.entries(data.composites || {}).forEach(([pair, src]) => {
-                    html += '<h3 style="font-size:14px;">' +
-                        pair.replace('|', ' &rarr; ') + '</h3>' +
-                        '<img src="' + src + '">';
-                });
-                figuresOut.innerHTML = html;
-            })
-            .catch((e) => toast('Figures failed: ' + e.message, 'error'))
-            .finally(() => {
-                figuresBtn.disabled = false;
-                figuresBtn.textContent = 'Download figures';
-            });
-    });
 
     /* ---------------- wiring ---------------- */
 
@@ -2167,6 +2283,9 @@ document.addEventListener('DOMContentLoaded', function () {
                     gridCount.textContent + '</span>)';
             });
     });
+
+    [compSrc, compDst, compRegion].forEach(
+        (node) => node.addEventListener('change', loadComposite));
 
     viewChannel.addEventListener('change', refreshView);
     clearRegionsBtn.addEventListener('click', function () {

@@ -4,9 +4,9 @@ Wires :mod:`zarr_reader` (which fetches image blocks) to
 :mod:`bleedthrough` (which measures channel coupling) and serves the
 result to the browser.
 
-The numerical core of :mod:`bleedthrough` drives the interactive view;
-its matplotlib figures are produced only for the download button. The
-module itself is used unmodified.
+Only the numerical core of :mod:`bleedthrough` is used -- the module
+itself is never modified, and its matplotlib figures are not used: the
+page renders everything from the numbers so it stays interactive.
 
 Two properties of the analysis shape almost everything here:
 
@@ -21,7 +21,6 @@ Two properties of the analysis shape almost everything here:
   get wrong.
 """
 
-import inspect
 import logging
 import uuid
 from collections import OrderedDict
@@ -77,9 +76,9 @@ _CACHE_BUDGET_BYTES = 3 * 1024**3
 class _BlockCache:
     """Byte-budgeted LRU holding extracted blocks between requests.
 
-    Only exists so the figure download can re-render without pulling
-    gigabytes from S3 again. A plain dict would pin every block ever
-    analysed for the life of the process.
+    Lets the composite view switch pair, block and plane without
+    pulling gigabytes from S3 again. A plain dict would pin every block
+    ever analysed for the life of the process.
     """
 
     def __init__(self, budget_bytes: int):
@@ -650,6 +649,7 @@ def _run_analysis(
             "origins": origins,
             "background": background,
             "coefficients": coeffs,
+            "sigmas": sigmas,
             "base_path": base_path,
         },
     )
@@ -1056,62 +1056,133 @@ async def run_status(job_id: str = Query(...)):
     }
 
 
-@router.post("/figures")
-async def figures(payload: Dict[str, Any]):
-    """Render the publication figures for a completed run.
+def _ramp_png(plane: np.ndarray, vmax: float, rgb: Sequence[int]) -> str:
+    """Render one sigma plane as a single-colour ramp on black.
 
-    Uses the blocks cached by ``/run`` so nothing is re-downloaded.
+    Deliberately the same additive encoding the merge uses -- source
+    into green, destination into red and blue -- so the three panels
+    literally compose: the merge is the other two added together.
 
     Args:
-        payload: JSON body carrying ``run_id``.
+        plane: Values in sigma units.
+        vmax: Sigma value rendered at full brightness.
+        rgb: Which channels this colour drives, as 0/1 per component.
 
     Returns:
-        Base64 PNG data URIs for the density grid and each pair
-        composite.
+        A ``data:image/png;base64,...`` string.
     """
-    run_id = str((payload or {}).get("run_id", ""))
-    entry = _block_cache.get(run_id)
+    level = np.clip(np.asarray(plane, np.float32) / max(vmax, 1e-6), 0, 1)
+    out = np.zeros(level.shape + (3,), dtype=np.uint8)
+    for index, on in enumerate(rgb):
+        if on:
+            out[..., index] = (level * 255).astype(np.uint8)
+    return _png_data_uri(out)
+
+
+def _png_data_uri(rgb: np.ndarray) -> str:
+    """Encode an RGB array as a base64 PNG data URI.
+
+    Args:
+        rgb: ``(rows, cols, 3)`` uint8 array.
+
+    Returns:
+        A ``data:image/png;base64,...`` string.
+    """
+    import base64
+
+    buffer = BytesIO()
+    Image.fromarray(rgb, mode="RGB").save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
+@router.post("/composite")
+async def composite(payload: Dict[str, Any]):
+    """Render one region's channel pair as green against magenta.
+
+    Served from the blocks ``/run`` already cached, so switching pair,
+    region or plane costs no S3 traffic.
+
+    Normalisation is pooled over every region, matching the density
+    grid, so a region that is genuinely brighter than another still
+    looks brighter here. Both channels then share one scale set by the
+    source, which is what makes **neutral grey mean equal signal
+    relative to each channel's own noise** -- the point of the figure.
+
+    Args:
+        payload: JSON body with ``run_id``, ``source``, ``dest``,
+            optional ``region`` index and ``z_index``.
+
+    Returns:
+        Three base64 PNGs plus the scale and sigmas behind them.
+    """
+    body = payload or {}
+    entry = _block_cache.get(str(body.get("run_id", "")))
     if entry is None:
         return JSONResponse(
             status_code=404,
-            content={"error": "run not found or evicted; re-run diagnostics"},
+            content={"error": "run not found or evicted; re-run"},
+        )
+    names = entry["names"]
+    source = str(body.get("source", names[0]))
+    dest = str(body.get("dest", names[-1]))
+    if source not in names or dest not in names:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"channels must be among {names}"},
         )
 
+    blocks = entry["blocks"]
+    region = max(0, min(int(body.get("region", 0)), len(blocks) - 1))
+
     def _render() -> Dict[str, Any]:
-        """Build every figure from the cached blocks."""
-        grid, _ = bt.plot_density_grid(
-            entry["blocks"], background=entry["background"]
+        """Normalise, slice and encode the three panels."""
+        # Sigma comes from the pooled fit, so a value here means the
+        # same as in the density grid. The median is taken per block,
+        # though: pooling it leaves a block whose background sits above
+        # the pooled level offset by many sigma, and the panel clips to
+        # solid colour with no structure visible at all.
+        sigmas = entry.get("sigmas")
+        if sigmas is None:
+            _, sigmas, _ = bt.normalize_blocks(blocks, entry["background"])
+        single, _, _ = bt.normalize_blocks(
+            [blocks[region]], entry["background"], sigmas=sigmas
         )
-        labels = [f"region {i}" for i in range(len(entry["blocks"]))]
-        extra = {}
-        # One normalisation across every column, so regions can be
-        # compared with each other; scaling each separately hides
-        # exactly the differences between them. Only some revisions of
-        # bleedthrough.py expose it, so ask before passing it.
-        if (
-            "shared_scale"
-            in inspect.signature(bt.plot_pair_composite).parameters
-        ):
-            extra["shared_scale"] = True
-        composites = bt.plot_pair_composites(
-            entry["blocks"],
-            coefficients=entry["coefficients"],
-            background=entry["background"],
-            column_labels=labels,
-            **extra,
-        )
+        normalized = {region: single[0]}
+        depth = np.asarray(normalized[region][source]).shape[0]
+        z_index = body.get("z_index")
+        z_index = depth // 2 if z_index is None else int(z_index)
+        z_index = max(0, min(z_index, depth - 1))
+
+        z_src = bt._plane(normalized[region][source], z_index)
+        z_dst = bt._plane(normalized[region][dest], z_index)
+
+        # Sigma is pooled over every block, so the units match the
+        # density grid. Display brightness is not: a block whose
+        # background sits above the pooled median would otherwise clip
+        # to solid colour and show no structure at all. Both channels
+        # still share this one scale, which is what makes grey mean
+        # equal signal.
+        vmax = max(float(np.percentile(z_src, 99.5)), 1.0)
+
+        merge = (bt.composite_rgb(z_src, z_dst, vmax) * 255).astype(np.uint8)
         return {
-            "density_grid": _figure_to_png(grid),
-            "composites": {
-                f"{src}|{dst}": _figure_to_png(fig)
-                for (src, dst), fig in composites.items()
+            "source_png": _ramp_png(z_src, vmax, (0, 1, 0)),
+            "dest_png": _ramp_png(z_dst, vmax, (1, 0, 1)),
+            "merge_png": _png_data_uri(merge),
+            "vmax": round(vmax, 2),
+            "z_index": z_index,
+            "n_planes": int(depth),
+            "sigmas": {
+                key: round(float(value), 2) for key, value in sigmas.items()
             },
+            "shape": [int(v) for v in z_src.shape],
         }
 
     try:
         return JSONResponse(content=await run_in_threadpool(_render))
     except Exception as err:
-        logger.error("figure rendering failed: %s", err, exc_info=True)
+        logger.error("composite failed: %s", err, exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(err)})
 
 

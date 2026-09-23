@@ -1264,6 +1264,28 @@ async def unmixed_spots_page(request: Request):
     return templates.TemplateResponse(request=request, name="unmixed_spots.html", context={"version": __version__})
 
 
+def static_stamp(*names: str) -> str:
+    """Build a cache-busting token from static files' modification times.
+
+    StaticFiles sends an ETag but no Cache-Control, so browsers fall
+    back to heuristic freshness and can serve a stale script without
+    revalidating. Stamping the URL means an edited asset is always a
+    different URL, and always loads.
+
+    Args:
+        *names: Paths relative to the static directory.
+
+    Returns:
+        A short hex token that changes whenever any named file does.
+    """
+    newest = 0.0
+    for name in names:
+        path = static_dir / name
+        if path.exists():
+            newest = max(newest, path.stat().st_mtime)
+    return format(int(newest), "x")
+
+
 @app.get("/bleedthrough")
 async def bleedthrough_page(request: Request):
     """Serve the channel bleed-through diagnostics page."""
@@ -1271,7 +1293,12 @@ async def bleedthrough_page(request: Request):
     return templates.TemplateResponse(
         request=request,
         name="bleedthrough.html",
-        context={"version": __version__},
+        context={
+            "version": __version__,
+            "asset_stamp": static_stamp(
+                "js/bleedthrough.js", "js/colors.js", "css/styles.css"
+            ),
+        },
     )
 
 

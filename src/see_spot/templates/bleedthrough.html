@@ -7,7 +7,7 @@
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/nouislider@15.7.1/dist/nouislider.min.css">
     <script src="https://cdn.jsdelivr.net/npm/nouislider@15.7.1/dist/nouislider.min.js"></script>
-    <link rel="stylesheet" href="/static/css/styles.css">
+    <link rel="stylesheet" href="/static/css/styles.css?v={{ asset_stamp }}">
     <style>
         body { font-family: sans-serif; margin: 0; background-color: #fafafa; }
         #bt-layout { display: flex; align-items: stretch; }
@@ -339,6 +339,37 @@
             font-size: 12px;
         }
         #bt-voxel-card .vals { font-family: monospace; margin: 6px 0; }
+        #bt-comp-controls {
+            display: flex;
+            gap: 12px;
+            align-items: flex-start;
+            flex-wrap: wrap;
+            margin-bottom: 12px;
+        }
+        #bt-comp-controls > div { min-width: 140px; }
+        #bt-comp-cols {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 12px;
+            max-width: 900px;
+        }
+        #bt-comp-cols figure { margin: 0; }
+        #bt-comp-cols img {
+            width: 100%;
+            display: block;
+            background: #000;
+            border: 1px solid #ddd;
+            /* Blocks are small; show the voxels rather than blur them. */
+            image-rendering: pixelated;
+            aspect-ratio: 1 / 1;
+            object-fit: contain;
+        }
+        #bt-comp-cols figcaption {
+            font-size: 11px;
+            color: #666;
+            margin-top: 5px;
+            text-align: center;
+        }
         #bt-figures img { max-width: 100%; border: 1px solid #eee; margin-top: 10px; }
     .noUi-connect { background: #2196F3; }
         .noUi-horizontal { height: 8px; }
@@ -467,7 +498,6 @@
                 <div id="bt-progress-text"
                      style="font-size:11px;color:#666;margin-top:4px;"></div>
             </div>
-            <button id="bt-figures" class="bt-btn" style="margin-top:8px;display:none;">Download figures</button>
         </div>
 
         <div id="bt-main">
@@ -514,13 +544,48 @@
                     </div>
                     <div id="bt-voxel-card" style="display:none;"></div>
                     <div id="bt-grid"></div>
-                    <div id="bt-figures-out"></div>
+
+                    <!-- Green vs magenta composite, per pair and block -->
+                    <div id="bt-comp-wrap" style="display:none;">
+                        <h3 style="font-size:15px;margin:22px 0 2px 0;">
+                            Channel pair in a block
+                        </h3>
+                        <div id="bt-comp-caption"
+                             style="font-size:12px;color:#777;margin-bottom:10px;"></div>
+                        <div id="bt-comp-controls">
+                            <div>
+                                <span class="bt-label">Source (green)</span>
+                                <select id="bt-comp-src" class="bt-select"></select>
+                            </div>
+                            <div>
+                                <span class="bt-label">Destination (magenta)</span>
+                                <select id="bt-comp-dst" class="bt-select"></select>
+                            </div>
+                            <div>
+                                <span class="bt-label">Block</span>
+                                <select id="bt-comp-region" class="bt-select"></select>
+                            </div>
+                            <div style="flex:1.4;">
+                                <span class="bt-label">
+                                    Plane in block &mdash;
+                                    <span id="bt-comp-zval" class="bt-mono"></span>
+                                </span>
+                                <div id="bt-comp-z" style="margin:10px 6px 0 6px;"></div>
+                            </div>
+                        </div>
+                        <div id="bt-comp-cols">
+                            <figure><img id="bt-comp-a"><figcaption id="bt-comp-a-cap"></figcaption></figure>
+                            <figure><img id="bt-comp-b"><figcaption id="bt-comp-b-cap"></figcaption></figure>
+                            <figure><img id="bt-comp-m"><figcaption>merge &mdash; grey means equal signal</figcaption></figure>
+                        </div>
+                        <div id="bt-comp-key" class="bt-note" style="margin-top:10px;"></div>
+                    </div>
                 </div>
             </div>
         </div>
     </div>
 
-    <script src="/static/js/colors.js"></script>
-    <script src="/static/js/bleedthrough.js"></script>
+    <script src="/static/js/colors.js?v={{ asset_stamp }}"></script>
+    <script src="/static/js/bleedthrough.js?v={{ asset_stamp }}"></script>
 </body>
 </html>
