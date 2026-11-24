@@ -7,13 +7,17 @@ per axis. The second hits the public ``aind-open-data`` bucket, matching
 the style of the other tests in this directory.
 """
 
+import json
 import unittest
+from urllib.parse import unquote, urlparse
 
 import numpy as np
 
 from see_spot import bleedthrough as bt
+from see_spot import ng_utils
 from see_spot import zarr_reader as zr
 from see_spot.bleedthrough_api import (
+    _pick_voxels,
     _run_analysis,
     _to_png,
     bright_fraction,
@@ -285,6 +289,153 @@ class TestPureLogic(unittest.TestCase):
         shifted = registration_scan(rolled, ["a", "b"], 1.0)["a|b"]
         self.assertEqual(abs(shifted["dx"]), 3)
         self.assertFalse(shifted["aligned"])
+
+    def test_top_mode_draws_only_from_the_brightest_voxels(self):
+        """Top mode keeps the bright tail, where coupling shows.
+
+        A uniform draw from these blocks is almost all background, so
+        the grid renders as one blob near the origin.
+        """
+        rng = np.random.default_rng(3)
+        flat = rng.normal(0.0, 1.0, size=(2, 20000)).astype(np.float32)
+        bright = rng.choice(20000, size=200, replace=False)
+        flat[0, bright] += 50.0
+
+        picked = _pick_voxels(flat, 100, "top", 1.0, 0.5, rng)
+        self.assertEqual(picked.size, 100)
+        # Everything drawn clears the 99th percentile of the score.
+        cut = np.percentile(flat.max(axis=0), 99.0)
+        self.assertTrue(bool((flat.max(axis=0)[picked] >= cut).all()))
+
+    def test_top_mode_returns_the_whole_pool_when_it_is_short(self):
+        """A thin block holds fewer bright voxels than the quota.
+
+        Padding the rest with background would defeat the point of the
+        mode, so the true count comes back instead.
+        """
+        rng = np.random.default_rng(4)
+        flat = rng.normal(0.0, 1.0, size=(2, 1000)).astype(np.float32)
+        picked = _pick_voxels(flat, 500, "top", 0.1, 0.5, rng)
+        self.assertEqual(picked.size, 1)
+        self.assertEqual(_pick_voxels(flat, 500, "top", 0.0, 0.5, rng).size, 1)
+
+    def test_uniform_and_stratified_modes_still_behave(self):
+        """The older modes keep their contract as "top" becomes default."""
+        rng = np.random.default_rng(5)
+        flat = rng.normal(0.0, 1.0, size=(3, 5000)).astype(np.float32)
+        flat[1, :250] += 40.0
+
+        uniform = _pick_voxels(flat, 400, "uniform", 0.1, 0.5, rng)
+        self.assertEqual(uniform.size, 400)
+        self.assertEqual(np.unique(uniform).size, 400)
+
+        strat = _pick_voxels(flat, 400, "stratified", 0.1, 0.5, rng)
+        self.assertLessEqual(strat.size, 400)
+        share = float((flat.max(axis=0)[strat] > 1.0).mean())
+        self.assertGreater(share, float((flat.max(axis=0) > 1.0).mean()))
+
+    def test_sampling_mode_moves_the_display_but_not_the_positions(self):
+        """Modes change which rows come back, not how they are placed.
+
+        The page tells the user that sampling is a display choice, so
+        the coordinates a row carries must not depend on it.
+        """
+        rng = np.random.default_rng(6)
+        block = {
+            "a": rng.normal(0.0, 1.0, size=(8, 24, 24)).astype(np.float32),
+            "b": rng.normal(0.0, 1.0, size=(8, 24, 24)).astype(np.float32),
+        }
+        block["a"][2, 5, 5] = 80.0
+        block["b"][2, 5, 5] = 40.0
+        origins = [(100, 200, 300)]
+
+        rows = {
+            mode: stratified_sample(
+                [block],
+                origins,
+                ["a", "b"],
+                n_sample=40,
+                seed=0,
+                scale=(2.0, 4.0, 4.0),
+                mode=mode,
+            )
+            for mode in ("top", "stratified", "uniform")
+        }
+        top_max = max(r[4] for r in rows["top"])
+        self.assertGreater(top_max, 50.0)
+        for mode, drawn in rows.items():
+            for row in drawn:
+                self.assertEqual(row[0], 0.0)
+                self.assertGreaterEqual(row[1], 100.0)
+                self.assertLess(row[1], 100.0 + 8 * 2.0, mode)
+                self.assertLess(row[2], 200.0 + 24 * 4.0, mode)
+
+    def test_row_positions_are_whole_voxels(self):
+        """Level-0 indices stay integral under a ragged pyramid ratio.
+
+        The scale factors are shape ratios and rarely divide evenly, so
+        an unrounded position reaches the voxel card and the
+        Neuroglancer link as a fraction of a voxel.
+        """
+        rng = np.random.default_rng(7)
+        block = {"a": rng.normal(0.0, 1.0, size=(4, 8, 8)).astype(np.float32)}
+        rows = stratified_sample(
+            [block],
+            [(3, 7, 11)],
+            ["a"],
+            n_sample=20,
+            seed=0,
+            scale=(1.99886, 3.99772, 3.99772),
+            mode="uniform",
+        )
+        self.assertTrue(rows)
+        for row in rows:
+            for axis in (1, 2, 3):
+                self.assertEqual(row[axis], float(int(row[axis])))
+
+    def test_ng_link_opens_only_the_clicked_pair(self):
+        """A click is about two channels, so only those start visible.
+
+        Every layer still loads, so the others are one toggle away, but
+        opening all five blends them into an unreadable composite.
+        """
+        paths = [
+            f"s3://bucket/dataset/fusion/ch_{name}/image.zarr"
+            for name in ("405", "488", "561", "594", "638")
+        ]
+        link = ng_utils.create_link_no_upload(
+            paths,
+            resolution_zyx=[1.0, 0.5, 0.5],
+            position=[1, 2, 3, 0],
+            point_annotation=[1, 2, 3, 0.5, 0],
+            visible_channels=["488", "561"],
+        )
+        state = json.loads(unquote(urlparse(link).fragment.lstrip("!")))
+        images = [
+            layer for layer in state["layers"] if layer.get("type") == "image"
+        ]
+        self.assertEqual(len(images), 5)
+        visible = sorted(layer["name"] for layer in images if layer["visible"])
+        self.assertEqual(visible, ["CH_488", "CH_561"])
+
+    def test_ng_link_still_shows_everything_by_default(self):
+        """The Spots page shares this builder and must not change."""
+        paths = [
+            f"s3://bucket/dataset/fusion/ch_{name}/image.zarr"
+            for name in ("405", "488")
+        ]
+        link = ng_utils.create_link_no_upload(
+            paths,
+            resolution_zyx=[1.0, 0.5, 0.5],
+            position=[1, 2, 3, 0],
+            point_annotation=[1, 2, 3, 0.5, 0],
+        )
+        state = json.loads(unquote(urlparse(link).fragment.lstrip("!")))
+        images = [
+            layer for layer in state["layers"] if layer.get("type") == "image"
+        ]
+        self.assertTrue(images)
+        self.assertTrue(all(layer["visible"] for layer in images))
 
 
 class TestAgainstRealData(unittest.TestCase):

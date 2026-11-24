@@ -81,6 +81,7 @@ def create_link_no_upload(
     spot_id=None,
     point_annotation=None,
     output_folder=None,
+    visible_channels=None,
 ):
     """
     Create a Neuroglancer JSON file for multiple channels with a single point annotation.
@@ -98,6 +99,11 @@ def create_link_no_upload(
     cell_id (int): cell id to plot (gets added to NG json filename)
     spot_id (str or int, optional): ID for the spot annotation
     point_annotation (dict or list, optional): Coordinates [x,y,z] for a single point annotation
+    visible_channels (iterable, optional): Channel numbers to start
+        visible, e.g. [488, 561]. Every other channel is still loaded
+        as a layer but starts hidden, so a pairwise view does not open
+        with every channel blended over every other. None, the default,
+        leaves all channels visible.
 
     Returns:
     str: URL to the Neuroglancer link
@@ -126,6 +132,11 @@ def create_link_no_upload(
         "c'": {"voxel_size": 1, "unit": ""},
         "t": {"voxel_size": 0.001, "unit": "seconds"},
     }
+
+    # Normalised once so callers may pass ints or strings ("488").
+    wanted_visible = None
+    if visible_channels is not None:
+        wanted_visible = {int(c) for c in visible_channels}
 
     # Initialize layers list
     layers = []  # Represent Neuroglancer Tabs
@@ -156,7 +167,9 @@ def create_link_no_upload(
                 "vec": "vec3",
             },
             "localPosition": [0.5],
-            "visible": True,
+            "visible": (
+                True if wanted_visible is None else channel in wanted_visible
+            ),
             "opacity": opacity,
             "name": f"CH_{channel}",
             "blend": blend,

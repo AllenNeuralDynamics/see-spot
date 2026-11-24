@@ -58,6 +58,11 @@ document.addEventListener('DOMContentLoaded', function () {
     const resultsBody = el('bt-results-body');
     const resultsHeader = el('bt-results-header');
     const voxelCard = el('bt-voxel-card');
+    const selCard = el('bt-sel-card');
+    const colorMode = el('bt-color-mode');
+    const axisScale = el('bt-axis-scale');
+    const colorKey = el('bt-color-key');
+    const zoomReset = el('bt-zoom-reset');
     const gridDom = el('bt-grid');
     const matrixDom = el('bt-matrix');
     const matrixCaption = el('bt-matrix-caption');
@@ -169,9 +174,19 @@ document.addEventListener('DOMContentLoaded', function () {
         settingSide: false,    // guard: programmatic slider move
         sideClamped: false,
         compToken: 0,
+        colorMode: 'position',
+        axisScale: 'channel',
+        rowColors: [],
+        colorExtent: null,
         frame: null,           // reused ImageData
         lut: null              // reused value -> byte table
     };
+
+    // The displayed sample and its colours drive every bit of the
+    // grid's interactivity, and nothing outside this closure can see
+    // them. Exposed read-only so the end-to-end tests can check that a
+    // point's colour really does track its position in the volume.
+    window.seeSpotBleedthroughState = state;
 
     /* ---------------- helpers ---------------- */
 
@@ -1349,19 +1364,53 @@ document.addEventListener('DOMContentLoaded', function () {
         // Kept so a click's dataIndex resolves back to a real voxel.
         state.displayRows = rows;
 
-        let high = 6;
-        rows.forEach((p) => {
+        // Range from the data rather than a fixed floor: with only the
+        // brightest voxels sampled, a -1.5 sigma floor is mostly empty
+        // space. Zero stays in view because the fits pass through it.
+        //
+        // Per channel by default, because a single pooled range is set
+        // by whichever channel is brightest and squeezes every other
+        // panel against its own axis -- on this data the dimmest
+        // channel's whole distribution landed inside the first tenth
+        // of a pooled axis. Sigma units are already per-channel, so a
+        // shared range buys comparability rather than correctness, and
+        // it stays available from the selector.
+        const quantile = (values, q) => {
+            if (!values.length) { return 1; }
+            const sorted = values.slice().sort((a, b) => a - b);
+            return sorted[Math.min(sorted.length - 1,
+                Math.floor(q * sorted.length))];
+        };
+        const perChannel = [];
+        for (let c = 0; c < count; c++) {
+            const values = rows.map((p) => p[4 + c]);
+            perChannel.push({
+                low: Math.min(0, quantile(values, 0.005)),
+                high: Math.max(quantile(values, 0.995), 1)
+            });
+        }
+        if (state.axisScale === 'shared') {
+            const pooled = [];
+            rows.forEach((p) => {
+                for (let c = 0; c < count; c++) { pooled.push(p[4 + c]); }
+            });
+            const lo = Math.min(0, quantile(pooled, 0.005));
+            const hi = Math.max(quantile(pooled, 0.995), 1);
             for (let c = 0; c < count; c++) {
-                if (p[4 + c] > high) { high = p[4 + c]; }
+                perChannel[c] = { low: lo, high: hi };
             }
-        });
-        high = Math.min(high, 40);
+        }
+        state.rowColors = buildRowColors(rows, result);
 
         const grids = [];
         const xAxes = [];
         const yAxes = [];
         const series = [];
         const titles = [];
+        // brush and brushLink must name only the scatter series: the
+        // fit lines, wedges and histograms in this chart do not share
+        // the row index space, and linking them would be meaningless.
+        const scatterIndices = [];
         const padX = 5.5;
         const padY = 4.0;
         const cellW = (94 - padX) / count;
@@ -1376,24 +1425,29 @@ document.addEventListener('DOMContentLoaded', function () {
                     width: (cellW - 1.6) + '%',
                     height: (cellH - 2.2) + '%'
                 });
+                // x shows the row channel and y the column channel,
+                // so each axis takes that channel's own range.
+                const xRange = perChannel[row];
+                const yRange = perChannel[col];
                 const common = {
                     gridIndex: k,
-                    min: AXIS_LOW,
-                    max: high,
                     axisLabel: { fontSize: 9, color: '#888' },
                     splitLine: { show: false }
                 };
-                xAxes.push(Object.assign({ type: 'value' }, common));
-                yAxes.push(Object.assign({ type: 'value' }, common));
+                xAxes.push(Object.assign({ type: 'value' }, common,
+                    { min: xRange.low, max: xRange.high }));
+                yAxes.push(Object.assign({ type: 'value' }, common,
+                    { min: yRange.low, max: yRange.high }));
 
                 if (row === col) {
                     // Diagonal: that channel's own intensity histogram.
                     const bins = 48;
                     const counts = new Array(bins).fill(0);
+                    const span = xRange.high - xRange.low;
                     rows.forEach((p) => {
                         const v = p[4 + row];
                         const b = Math.floor(
-                            ((v - AXIS_LOW) / (high - AXIS_LOW)) * bins);
+                            ((v - xRange.low) / span) * bins);
                         if (b >= 0 && b < bins) { counts[b] += 1; }
                     });
                     series.push({
@@ -1404,7 +1458,7 @@ document.addEventListener('DOMContentLoaded', function () {
                         silent: true,
                         itemStyle: { color: window.seeSpotColor(names[row]) },
                         data: counts.map((n, b) => [
-                            AXIS_LOW + (b + 0.5) * (high - AXIS_LOW) / bins,
+                            xRange.low + (b + 0.5) * span / bins,
                             n
                         ])
                     });
@@ -1426,6 +1480,7 @@ document.addEventListener('DOMContentLoaded', function () {
                     // Off-diagonal: column channel against row channel,
                     // one mark per sampled voxel.
                     const data = rows.map((p) => [p[4 + row], p[4 + col]]);
+                    scatterIndices.push(series.length);
                     series.push({
                         type: 'scatter',
                         xAxisIndex: k,
@@ -1434,8 +1489,10 @@ document.addEventListener('DOMContentLoaded', function () {
                         progressive: 2000,
                         progressiveThreshold: 2000,
                         itemStyle: {
-                            color: window.seeSpotColor(names[row]),
-                            opacity: 0.45
+                            color: state.colorMode === 'channel'
+                                ? window.seeSpotColor(names[row])
+                                : (p) => state.rowColors[p.dataIndex],
+                            opacity: 0.55
                         },
                         data: data,
                         _pair: [names[row], names[col]]
@@ -1465,15 +1522,15 @@ document.addEventListener('DOMContentLoaded', function () {
                             silent: true,
                             clip: true,
                             data: [[0, 0]],
-                            renderItem: (function (obs, nul) {
+                            renderItem: (function (obs, nul, end) {
                                 return function (params, api) {
                                     return {
                                         type: 'polygon',
                                         shape: {
                                             points: [
                                                 api.coord([0, 0]),
-                                                api.coord([high, obs * high]),
-                                                api.coord([high, nul * high])
+                                                api.coord([end, obs * end]),
+                                                api.coord([end, nul * end])
                                             ]
                                         },
                                         style: {
@@ -1481,7 +1538,7 @@ document.addEventListener('DOMContentLoaded', function () {
                                         }
                                     };
                                 };
-                            }(observed, displaced))
+                            }(observed, displaced, xRange.high))
                         });
                     }
 
@@ -1490,7 +1547,7 @@ document.addEventListener('DOMContentLoaded', function () {
                             type: 'line', xAxisIndex: k, yAxisIndex: k,
                             silent: true, symbol: 'none',
                             lineStyle: { color: '#111', width: 1.4 },
-                            data: [[0, 0], [high, observed * high]]
+                            data: [[0, 0], [xRange.high, observed * xRange.high]]
                         });
                     }
                     if (displaced !== null && displaced !== undefined) {
@@ -1500,7 +1557,9 @@ document.addEventListener('DOMContentLoaded', function () {
                             lineStyle: {
                                 color: '#555', width: 1.2, type: 'dashed'
                             },
-                            data: [[0, 0], [high, displaced * high]]
+                            data: [
+                                [0, 0], [xRange.high, displaced * xRange.high]
+                            ]
                         });
                     }
                     const alpha = entry.alpha;
@@ -1544,16 +1603,64 @@ document.addEventListener('DOMContentLoaded', function () {
         titles.push({
             left: '0.4%', top: '98%',
             text: 'rows = source (x)   columns = destination (y)   ' +
-                'axes in sigmas   solid = observed, dashed = displaced null',
+                'axes in sigmas, ' + (state.axisScale === 'shared'
+                    ? 'one shared range'
+                    : 'each channel on its own range') +
+                '   solid = observed, dashed = displaced null',
             textStyle: { fontSize: 10, color: '#888' }
         });
 
+        const axisIndices = xAxes.map((_, i) => i);
         return {
             animation: false,
             grid: grids,
             xAxis: xAxes,
             yAxis: yAxes,
             series: series,
+            // One window over every panel: they already share a sigma
+            // range, so synchronised zoom keeps them comparable.
+            //
+            // filterMode 'none' is required, not a preference. Any
+            // filtering mode drops out-of-range points from the series,
+            // which renumbers dataIndex and silently breaks both
+            // brushLink and click-to-inspect.
+            dataZoom: [
+                {
+                    type: 'inside', xAxisIndex: axisIndices,
+                    filterMode: 'none', zoomOnMouseWheel: true,
+                    moveOnMouseMove: false, moveOnMouseWheel: false
+                },
+                {
+                    type: 'inside', yAxisIndex: axisIndices,
+                    filterMode: 'none', zoomOnMouseWheel: true,
+                    moveOnMouseMove: false, moveOnMouseWheel: false
+                }
+            ],
+            toolbox: {
+                right: 8, top: 0, itemSize: 13,
+                feature: {
+                    brush: { type: ['polygon', 'rect', 'keep', 'clear'] }
+                }
+            },
+            brush: {
+                brushType: 'polygon',
+                toolbox: ['polygon', 'rect', 'keep', 'clear'],
+                // Bind the brush to the grids. Without this ECharts
+                // makes it a single global rectangle in pixel space:
+                // a stroke can straddle several panels, and the area
+                // carries no data-space coordRange at all. Binding
+                // clips each stroke to the panel it starts in, which
+                // is what "draw in one plot" has to mean here.
+                xAxisIndex: 'all',
+                yAxisIndex: 'all',
+                seriesIndex: scatterIndices,
+                brushLink: scatterIndices,
+                throttleType: 'debounce',
+                throttleDelay: 150,
+                // Without this the unselected points go flat grey.
+                outOfBrush: { colorAlpha: 0.06 },
+                inBrush: { opacity: 0.85 }
+            },
             graphic: titles.map((t) => ({
                 type: 'text',
                 left: t.left,
@@ -1568,6 +1675,51 @@ document.addEventListener('DOMContentLoaded', function () {
                 }
             }))
         };
+    }
+
+    /**
+     * A colour per displayed row, under the current colour mode.
+     *
+     * Colour depends only on the row, never on the panel, so it is
+     * computed once and every panel reads it back by dataIndex. Doing
+     * it per panel would mean turning each data array into objects --
+     * tens of thousands of them across the grid.
+     *
+     * @param {number[][]} rows The displayed sample.
+     * @param {object} result Payload from /api/bleedthrough/run.
+     * @returns {string[]} One CSS colour per row.
+     */
+    function buildRowColors(rows, result) {
+        if (state.colorMode === 'region') {
+            const palette = ['#1976D2', '#E64A19', '#388E3C', '#7B1FA2',
+                '#00838F', '#C2185B', '#F9A825', '#455A64'];
+            return rows.map((p) => palette[p[0] % palette.length]);
+        }
+        if (state.colorMode === 'channel') {
+            return rows.map(() => null);   // panel colour is used instead
+        }
+
+        // Position mode: z, y and x drive red, green and blue over the
+        // bounding box of everything sampled, so two points of similar
+        // colour are physically near each other anywhere in the volume.
+        const lo = [Infinity, Infinity, Infinity];
+        const hi = [-Infinity, -Infinity, -Infinity];
+        rows.forEach((p) => {
+            for (let a = 0; a < 3; a++) {
+                const v = p[1 + a];
+                if (v < lo[a]) { lo[a] = v; }
+                if (v > hi[a]) { hi[a] = v; }
+            }
+        });
+        state.colorExtent = { lo: lo, hi: hi };
+        return rows.map((p) => {
+            const rgb = [0, 1, 2].map((a) => {
+                const span = hi[a] - lo[a] || 1;
+                // Floor at 40 so nothing renders as invisible black.
+                return Math.round(40 + 215 * (p[1 + a] - lo[a]) / span);
+            });
+            return 'rgb(' + rgb.join(',') + ')';
+        });
     }
 
     /**
@@ -1706,6 +1858,39 @@ document.addEventListener('DOMContentLoaded', function () {
                 }
             }]
         };
+    }
+
+    /** Explain what the current point colouring encodes. */
+    function updateColorKey() {
+        if (state.colorMode === 'channel') {
+            colorKey.innerHTML =
+                'Points coloured by the panel\u2019s <b>source</b> channel.';
+            return;
+        }
+        if (state.colorMode === 'region') {
+            colorKey.innerHTML =
+                'Points coloured by the <b>block</b> they came from.';
+            return;
+        }
+        const ext = state.colorExtent;
+        if (!ext) { colorKey.innerHTML = ''; return; }
+        const vox = state.voxelZyx || [1, 1, 1];
+        const span = [0, 1, 2].map(
+            (a) => ((ext.hi[a] - ext.lo[a]) * vox[a]).toFixed(0));
+        colorKey.innerHTML =
+            'Position colour: <b style="color:#c62828">z\u2192red</b> ' +
+            '<b style="color:#2e7d32">y\u2192green</b> ' +
+            '<b style="color:#1565c0">x\u2192blue</b>, spread over the ' +
+            'sampled extent (' + span.join(' &times; ') +
+            ' &micro;m). Points of similar colour are physically close.';
+    }
+
+    /** Drop any active polygon selection and its readout. */
+    function clearBrush() {
+        if (chart) {
+            chart.dispatchAction({ type: 'brush', areas: [] });
+        }
+        showSelection([]);
     }
 
     /** Draw the coupling matrix for a finished run. */
@@ -1892,6 +2077,9 @@ document.addEventListener('DOMContentLoaded', function () {
         resultsHeader.innerHTML = '';
         voxelCard.style.display = 'none';
         voxelCard.innerHTML = '';
+        selCard.style.display = 'none';
+        selCard.innerHTML = '';
+        colorKey.innerHTML = '';
         matrixCaption.innerHTML = '';
     }
 
@@ -1955,6 +2143,10 @@ document.addEventListener('DOMContentLoaded', function () {
                 } else {
                     state.hiddenRegions.add(region.index);
                 }
+                // The indices a brush produced point into the old row
+                // array; rebuilding it renumbers them, so drop the
+                // selection rather than highlight the wrong voxels.
+                clearBrush();
                 chart.setOption(buildGridOption(state.result), true);
             });
             resultsHeader.appendChild(label);
@@ -1969,21 +2161,97 @@ document.addEventListener('DOMContentLoaded', function () {
         if (!chart) { chart = echarts.init(gridDom); }
         chart.resize();
         chart.setOption(buildGridOption(result), true);
+        updateColorKey();
+        chart.off('brushselected');
+        chart.on('brushselected', function (params) {
+            const batch = (params.batch || [])[0];
+            if (!batch) { showSelection([]); return; }
+            // Every scatter series reports the same indices thanks to
+            // brushLink, so the first non-empty one is enough.
+            let picked = [];
+            (batch.selected || []).forEach((entry) => {
+                if (entry.dataIndex && entry.dataIndex.length > picked.length) {
+                    picked = entry.dataIndex;
+                }
+            });
+            showSelection(picked);
+        });
+
         chart.off('click');
         chart.on('click', function (params) {
             if (params.componentType !== 'series') { return; }
             if (params.seriesType !== 'scatter') { return; }
             const point = state.displayRows[params.dataIndex];
-            if (point) { showVoxel(point); }
+            // The panel names the pair the click is about, so the
+            // Neuroglancer view can open on those two channels alone.
+            const series = chart.getOption().series[params.seriesIndex];
+            if (point) { showVoxel(point, (series || {})._pair); }
         });
         setTimeout(() => chart.resize(), 0);
     }
 
     /**
+     * Summarise a polygon selection.
+     *
+     * The point of the readout is to separate a real co-located
+     * population from a coincidence in one pair: a tight span in z, y
+     * and x means one physical spot, a span covering the blocks means
+     * scattered tissue that merely happens to line up on these axes.
+     *
+     * @param {number[]} indices Row indices into state.displayRows.
+     */
+    function showSelection(indices) {
+        if (!indices || !indices.length || !state.result) {
+            selCard.style.display = 'none';
+            return;
+        }
+        const result = state.result;
+        const names = result.channels;
+        const rows = indices
+            .map((i) => state.displayRows[i])
+            .filter(Boolean);
+        if (!rows.length) { selCard.style.display = 'none'; return; }
+
+        const lo = [Infinity, Infinity, Infinity];
+        const hi = [-Infinity, -Infinity, -Infinity];
+        const sums = names.map(() => 0);
+        const regions = new Set();
+        rows.forEach((p) => {
+            regions.add(p[0]);
+            for (let a = 0; a < 3; a++) {
+                if (p[1 + a] < lo[a]) { lo[a] = p[1 + a]; }
+                if (p[1 + a] > hi[a]) { hi[a] = p[1 + a]; }
+            }
+            names.forEach((_, c) => { sums[c] += p[4 + c]; });
+        });
+
+        const voxUm = state.voxelZyx || [1, 1, 1];
+        const span = [0, 1, 2].map((a) => {
+            const vox = hi[a] - lo[a];
+            return vox.toFixed(0) + ' vox (' +
+                (vox * voxUm[a]).toFixed(1) + ' \u00b5m)';
+        });
+        const means = names
+            .map((n, c) => n + ' ' + (sums[c] / rows.length).toFixed(2))
+            .join('   ');
+
+        selCard.style.display = 'block';
+        selCard.innerHTML =
+            '<b>' + rows.length + ' voxels selected</b> across ' +
+            regions.size + ' block(s) &mdash; highlighted in every panel' +
+            '<div class="vals">mean \u03c3 &nbsp; ' + means + '</div>' +
+            '<div style="font-size:11px;color:#666;">span &nbsp; z ' +
+            span[0] + ' &nbsp; y ' + span[1] + ' &nbsp; x ' + span[2] +
+            '</div>';
+    }
+
+    /**
      * Show the clicked voxel and offer a Neuroglancer link.
      * @param {number[]} point A row of the shared sample.
+     * @param {string[]} [pair] The clicked panel's two channels. They
+     *     start visible in Neuroglancer; the rest load hidden.
      */
-    function showVoxel(point) {
+    function showVoxel(point, pair) {
         const result = state.result;
         const names = result.channels;
         const values = names.map(
@@ -2004,7 +2272,8 @@ document.addEventListener('DOMContentLoaded', function () {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     zarr_paths: result.zarr_paths,
-                    position: [point[1], point[2], point[3]]
+                    position: [point[1], point[2], point[3]],
+                    channels: pair || null
                 })
             })
                 .then((r) => r.json())
@@ -2045,6 +2314,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 voxel_size_um: voxel > 0 ? voxel : null,
                 window_um: windowUm > 0 ? windowUm : null,
                 n_sample: parseInt(sampleInput.value, 10) || 12000,
+                sample_mode: el('bt-sample-mode').value,
                 level: state.level,
                 min_bright_fraction: parseFloat(gateInput.value) || 0,
                 check_registration: true
@@ -2286,6 +2556,29 @@ document.addEventListener('DOMContentLoaded', function () {
 
     [compSrc, compDst, compRegion].forEach(
         (node) => node.addEventListener('change', loadComposite));
+
+    axisScale.addEventListener('change', function () {
+        state.axisScale = this.value;
+        if (state.result && chart) {
+            clearBrush();
+            chart.setOption(buildGridOption(state.result), true);
+            chart.dispatchAction({ type: 'dataZoom', start: 0, end: 100 });
+        }
+    });
+
+    colorMode.addEventListener('change', function () {
+        state.colorMode = this.value;
+        if (state.result && chart) {
+            clearBrush();
+            chart.setOption(buildGridOption(state.result), true);
+            updateColorKey();
+        }
+    });
+
+    zoomReset.addEventListener('click', function () {
+        if (!chart) { return; }
+        chart.dispatchAction({ type: 'dataZoom', start: 0, end: 100 });
+    });
 
     viewChannel.addEventListener('change', refreshView);
     clearRegionsBtn.addEventListener('click', function () {

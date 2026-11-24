@@ -339,6 +339,22 @@
             font-size: 12px;
         }
         #bt-voxel-card .vals { font-family: monospace; margin: 6px 0; }
+        #bt-sel-card {
+            border: 1px solid #b3d4f5;
+            background: #f2f8fe;
+            border-radius: 4px;
+            padding: 9px 12px;
+            margin-bottom: 10px;
+            font-size: 12px;
+        }
+        #bt-sel-card .vals { font-family: monospace; margin: 5px 0; }
+        #bt-grid-bar {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin: 14px 0 2px 0;
+        }
         #bt-comp-controls {
             display: flex;
             gap: 12px;
@@ -482,6 +498,14 @@
                         <span class="bt-label">Sample pts</span>
                         <input id="bt-sample" class="bt-input" type="number" step="1000" value="12000">
                     </div>
+                    <div>
+                        <span class="bt-label">Sample from</span>
+                        <select id="bt-sample-mode" class="bt-select">
+                            <option value="top" selected>Top 0.1% brightest</option>
+                            <option value="stratified">Mixed (bright + background)</option>
+                            <option value="uniform">Uniform</option>
+                        </select>
+                    </div>
                 </div>
                 <div class="bt-param-row">
                     <div>
@@ -542,7 +566,27 @@
                              style="font-size:12px;color:#777;margin:6px 0 2px 2px;"></div>
                         <div id="bt-matrix" style="width:100%;height:400px;"></div>
                     </div>
+                    <div id="bt-grid-bar">
+                        <span class="bt-label" style="margin:0;">Point colour</span>
+                        <select id="bt-color-mode" class="bt-select" style="width:auto;">
+                            <option value="position" selected>Position (z,y,x &rarr; R,G,B)</option>
+                            <option value="channel">Source channel</option>
+                            <option value="region">Block</option>
+                        </select>
+                        <span class="bt-label" style="margin:0;">Axis scale</span>
+                        <select id="bt-axis-scale" class="bt-select" style="width:auto;">
+                            <option value="channel" selected>Per channel (fills each panel)</option>
+                            <option value="shared">Shared sigma range</option>
+                        </select>
+                        <button id="bt-zoom-reset" class="bt-btn"
+                                style="width:auto;padding:5px 12px;font-size:11px;">Reset zoom</button>
+                        <span style="font-size:11px;color:#888;">
+                            scroll to zoom &middot; toolbar at right draws a polygon
+                        </span>
+                    </div>
+                    <div id="bt-color-key" style="font-size:11px;color:#777;margin:2px 0 6px 2px;"></div>
                     <div id="bt-voxel-card" style="display:none;"></div>
+                    <div id="bt-sel-card" style="display:none;"></div>
                     <div id="bt-grid"></div>
 
                     <!-- Green vs magenta composite, per pair and block -->

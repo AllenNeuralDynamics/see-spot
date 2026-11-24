@@ -49,6 +49,11 @@ router = APIRouter(prefix="/api/bleedthrough", tags=["bleedthrough"])
 
 DEFAULT_SAMPLE = 12000
 DEFAULT_BRIGHT_FRACTION = 0.5
+# Display sampling. "top" keeps only the brightest voxels, which is
+# where coupling is measurable; a uniform draw of these blocks is
+# almost all background and renders as one blob near the origin.
+DEFAULT_SAMPLE_MODE = "top"
+DEFAULT_TOP_PCT = 0.1
 DEFAULT_WINDOW_UM = 2.0
 # Least share of bright voxels for a region to count as tissue.
 # Gaussian noise alone puts ~0.13% of voxels above 3 sigma, so this
@@ -350,6 +355,72 @@ def registration_scan(
     return out
 
 
+def _pick_voxels(
+    flat: np.ndarray,
+    quota: int,
+    mode: str,
+    top_pct: float,
+    bright_fraction: float,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Choose which voxels of one block to draw.
+
+    Only affects what is drawn. Every fit runs over all voxels, so the
+    coefficients do not move when this changes.
+
+    Args:
+        flat: ``(channels, voxels)`` block in sigma units.
+        quota: How many voxels this block should contribute.
+        mode: ``"top"``, ``"stratified"`` or ``"uniform"``.
+        top_pct: Percent kept in ``"top"`` mode, e.g. 0.1 for the top
+            0.1 percent.
+        bright_fraction: Share drawn from bright voxels in
+            ``"stratified"`` mode.
+        rng: Source of randomness.
+
+    Returns:
+        Flat indices into the block, at most ``quota`` of them.
+    """
+    total = int(flat.shape[1])
+    if total == 0:
+        return np.array([], dtype=int)
+
+    if mode == "uniform":
+        take = min(quota, total)
+        return rng.choice(total, size=take, replace=False)
+
+    if mode == "top":
+        # Rank by the brightest channel at each voxel. argpartition is
+        # linear, which matters at a couple of million voxels a block.
+        keep = max(1, int(round(total * float(top_pct) / 100.0)))
+        keep = min(keep, total)
+        score = flat.max(axis=0)
+        if keep >= total:
+            pool = np.arange(total)
+        else:
+            cut = total - keep
+            pool = np.argpartition(score, cut)[cut:]
+        if pool.size <= quota:
+            # A thin block can hold fewer bright voxels than asked for;
+            # take the whole pool rather than padding with background.
+            return pool
+        return rng.choice(pool, size=quota, replace=False)
+
+    bright = np.flatnonzero((flat > 1.0).any(axis=0))
+    want_bright = min(len(bright), int(round(quota * bright_fraction)))
+    picks = []
+    if want_bright > 0:
+        picks.append(rng.choice(bright, size=want_bright, replace=False))
+    want_uniform = quota - want_bright
+    if want_uniform > 0:
+        picks.append(
+            rng.choice(total, size=min(want_uniform, total), replace=False)
+        )
+    if not picks:
+        return np.array([], dtype=int)
+    return np.unique(np.concatenate(picks))
+
+
 def stratified_sample(
     normalized: Sequence[Dict[str, np.ndarray]],
     origins: Sequence[Sequence[int]],
@@ -358,6 +429,8 @@ def stratified_sample(
     bright_fraction: float = DEFAULT_BRIGHT_FRACTION,
     seed: int = 0,
     scale: Sequence[float] = (1.0, 1.0, 1.0),
+    mode: str = DEFAULT_SAMPLE_MODE,
+    top_pct: float = DEFAULT_TOP_PCT,
 ) -> List[List[float]]:
     """Draw display voxels from every region, biased toward signal.
 
@@ -382,6 +455,8 @@ def stratified_sample(
         scale: Level-0 voxels per block voxel, per axis. Blocks read
             from a coarser level index in that level's voxels, so a
             position only maps back to the volume once scaled.
+        mode: Which voxels to draw; see :func:`_pick_voxels`.
+        top_pct: Percent kept in ``"top"`` mode.
 
     Returns:
         Rows of ``[region, gz, gy, gx, v0, v1, ...]``.
@@ -398,32 +473,21 @@ def stratified_sample(
         quota = min(quota, total)
 
         flat = np.stack([block[name].reshape(-1) for name in names])
-        bright = np.flatnonzero((flat > 1.0).any(axis=0))
-
-        want_bright = min(len(bright), int(round(quota * bright_fraction)))
-        picks = []
-        if want_bright > 0:
-            picks.append(rng.choice(bright, size=want_bright, replace=False))
-        want_uniform = quota - want_bright
-        if want_uniform > 0:
-            picks.append(
-                rng.choice(total, size=min(want_uniform, total), replace=False)
-            )
-        chosen = (
-            np.unique(np.concatenate(picks))
-            if picks
-            else np.array([], dtype=int)
-        )
+        chosen = _pick_voxels(flat, quota, mode, top_pct, bright_fraction, rng)
 
         coords = np.unravel_index(chosen, shape)
         origin = origins[index]
         values = flat[:, chosen]
         for position in range(chosen.size):
+            # Rounded because these are level-0 voxel indices, and the
+            # scale factors are shape ratios that rarely divide evenly
+            # (1755/878 is 1.99886, not 2). Left raw they reach the
+            # voxel card and the Neuroglancer link as fractions.
             row = [
                 float(index),
-                float(origin[0] + coords[0][position] * scale[0]),
-                float(origin[1] + coords[1][position] * scale[1]),
-                float(origin[2] + coords[2][position] * scale[2]),
+                float(round(origin[0] + coords[0][position] * scale[0])),
+                float(round(origin[1] + coords[1][position] * scale[1])),
+                float(round(origin[2] + coords[2][position] * scale[2])),
             ]
             row.extend(
                 round(float(values[channel, position]), 3)
@@ -526,6 +590,8 @@ def _run_analysis(
     check_registration: bool,
     level: int = 0,
     min_bright_fraction: float = DEFAULT_MIN_BRIGHT,
+    sample_mode: str = DEFAULT_SAMPLE_MODE,
+    top_pct: float = DEFAULT_TOP_PCT,
     progress: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Fetch every region's block and run the pooled analysis.
@@ -552,6 +618,8 @@ def _run_analysis(
         level: Pyramid level the blocks are read from.
         min_bright_fraction: Least share of bright voxels for a region
             to be kept. Zero keeps every region.
+        sample_mode: Which voxels the display sample draws from.
+        top_pct: Percent kept when ``sample_mode`` is ``"top"``.
         progress: Optional ``(stage, done, total)`` callback used to
             drive the progress bar.
 
@@ -633,6 +701,8 @@ def _run_analysis(
         n_sample,
         sample_bright_fraction,
         scale=scale,
+        mode=sample_mode,
+        top_pct=top_pct,
     )
     if check_registration:
         _say("checking registration")
@@ -680,6 +750,10 @@ def _run_analysis(
             for i in range(3)
         ],
         "voxels_per_region": int(np.prod(block_shape)),
+        "sample_mode": sample_mode,
+        "top_pct": float(top_pct),
+        "n_points": len(points),
+        "n_points_requested": int(n_sample),
         "has_null": bool(voxel_size_um and window_um),
         "registration": registration,
         "zarr_paths": [c.zarr_path for c in wanted],
@@ -1192,7 +1266,8 @@ async def ng_link(payload: Dict[str, Any]):
 
     Args:
         payload: JSON body with ``zarr_paths`` and a ``position`` given
-            as level-0 ``[z, y, x]``.
+            as level-0 ``[z, y, x]``. An optional ``channels`` list
+            names the channels to start visible; the rest load hidden.
 
     Returns:
         A dict holding the Neuroglancer ``url``.
@@ -1200,6 +1275,10 @@ async def ng_link(payload: Dict[str, Any]):
     body = payload or {}
     paths = body.get("zarr_paths") or []
     position = body.get("position") or []
+    # A click comes from one panel, so only that pair is worth showing.
+    # Opening every channel at once blends them into an unreadable
+    # composite, which is the opposite of what the click asked.
+    visible = body.get("channels") or None
     if not paths or len(position) != 3:
         return JSONResponse(
             status_code=400,
@@ -1217,6 +1296,7 @@ async def ng_link(payload: Dict[str, Any]):
             spot_id=body.get("spot_id", 0),
             position=[x, y, z, 0],
             point_annotation=[x, y, z, 0.5, 0],
+            visible_channels=visible,
         )
     except Exception as err:
         logger.error("ng-link failed: %s", err, exc_info=True)
